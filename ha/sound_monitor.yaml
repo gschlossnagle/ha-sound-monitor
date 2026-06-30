@@ -1,0 +1,75 @@
+# ============================================================
+# Home Assistant configuration for Sound Level Monitor
+# ============================================================
+# The Python script uses MQTT auto-discovery, so the two
+# core sensors (mean_dbfs, max_dbfs) appear automatically.
+#
+# The TEMPLATE SENSOR and DASHBOARD CARD below are optional
+# extras — add them manually if you want pop/creak detection.
+# ============================================================
+
+
+# ------------------------------------------------------------------
+# Optional template sensor: "pop index" = max - mean
+# A large gap (> ~15 dB) in a given minute suggests a discrete
+# transient event (pop, creak) rather than general ambient noise.
+# Add this to your configuration.yaml (or a packages/ file).
+# ------------------------------------------------------------------
+template:
+  - sensor:
+      - name: "Sound Pop Index"
+        unique_id: sound_monitor_pop_index
+        unit_of_measurement: "dB"
+        icon: mdi:waveform
+        state: >
+          {% set max_db  = states('sensor.living_room_sound_monitor_max_dbfs')  | float(none) %}
+          {% set mean_db = states('sensor.living_room_sound_monitor_mean_dbfs') | float(none) %}
+          {% if max_db is none or mean_db is none %}
+            unavailable
+          {% else %}
+            {{ (max_db - mean_db) | round(1) }}
+          {% endif %}
+
+
+# ------------------------------------------------------------------
+# Dashboard card — paste into a dashboard via "Edit > Add card >
+# Manual card" (or the raw YAML editor).
+#
+# Shows a 24-hour history of all three sensors so you can see
+# exactly when the house is popping and how loud it gets.
+# ------------------------------------------------------------------
+
+# CARD YAML (paste into dashboard):
+#
+# type: history-graph
+# title: Sound Monitor – Living Room
+# hours_to_show: 24
+# refresh_interval: 60
+# entities:
+#   - entity: sensor.living_room_sound_monitor_mean_dbfs
+#     name: Mean dBFS
+#   - entity: sensor.living_room_sound_monitor_max_dbfs
+#     name: Max dBFS
+#   - entity: sensor.sound_pop_index
+#     name: Pop Index (max − mean)
+
+
+# ------------------------------------------------------------------
+# Optional automation: notify when a big pop is detected
+# (pop index > 20 dB for at least one minute).
+# ------------------------------------------------------------------
+automation:
+  - alias: "Sound Monitor – Large Pop Detected"
+    id: sound_monitor_large_pop
+    trigger:
+      - platform: numeric_state
+        entity_id: sensor.sound_pop_index
+        above: 20
+    action:
+      - service: notify.notify
+        data:
+          title: "Thermal expansion event"
+          message: >
+            Pop detected at {{ now().strftime('%H:%M') }}.
+            Max {{ states('sensor.living_room_sound_monitor_max_dbfs') }} dBFS,
+            mean {{ states('sensor.living_room_sound_monitor_mean_dbfs') }} dBFS.

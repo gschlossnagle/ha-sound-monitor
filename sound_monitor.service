@@ -1,0 +1,23 @@
+[Unit]
+Description=Sound Level Monitor (Home Assistant MQTT)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi
+ExecStart=/usr/bin/python3 /home/pi/sound_monitor.py
+Restart=always
+RestartSec=10
+# Give the audio subsystem time to settle after login
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+# Keep stdout/stderr in the journal:
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sound_monitor
+
+[Install]
+WantedBy=multi-user.target
