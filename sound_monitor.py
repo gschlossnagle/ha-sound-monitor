@@ -217,6 +217,8 @@ def main() -> None:
 
     # --- Audio capture loop ---
     chunk_size = int(sample_rate * chunk_seconds)
+    # Unbounded is safe: the 0.1s drain loop far outpaces the ~10 chunks/s
+    # producer, and paho's loop_start() keeps client.publish() non-blocking.
     audio_queue: queue.Queue[np.ndarray] = queue.Queue()
     window_buffer: list[np.ndarray] = []
     window_start = time.monotonic()
@@ -255,6 +257,9 @@ def main() -> None:
                 events = detector.process(chunk) if detector else []
                 for ev in events:
                     event_count += 1
+                    # peak_dbfs here is the trigger-instant value. The clip
+                    # filename uses ev.peak_dbfs after refractory updates, so
+                    # a louder follow-up frame can make the two disagree.
                     client.publish(
                         f"{topic_base}/event",
                         json.dumps({
