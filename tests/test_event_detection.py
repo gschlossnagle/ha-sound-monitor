@@ -93,3 +93,21 @@ class TestRefractoryAndPeak:
         # 0.3-amplitude alone lands near -13 dBFS; the 0.8 follow-up
         # should have raised the recorded peak well above that.
         assert ev.peak_dbfs > -10.0
+
+
+class TestSustainedNoise:
+    def test_step_change_in_level_does_not_storm(self):
+        """A vacuum turning on is one onset, not events every 0.2 s.
+
+        The 1 s median gate should cut off retriggers within ~1 s of
+        onset even though the 30 s L90 baseline adapts much more slowly.
+        """
+        det = make_detector()
+        audio = np.concatenate([
+            quiet(3.0),
+            quiet(10.0, level=0.1, seed=1),  # step up to ~-20 dBFS
+        ])
+        events = run_detector(det, audio)
+        # Onset may fire a few times before the median catches up,
+        # but nothing after the first ~1 s of loud audio.
+        assert 1 <= len(events) <= 5
