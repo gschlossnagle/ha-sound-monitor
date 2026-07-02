@@ -98,7 +98,7 @@ def publish_discovery(client: mqtt.Client) -> None:
 
 def main() -> None:
     # --- MQTT setup ---
-    client = mqtt.Client(client_id=DEVICE_ID)
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=DEVICE_ID)
     client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
     client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
     client.loop_start()
