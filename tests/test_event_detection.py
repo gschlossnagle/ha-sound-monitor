@@ -137,3 +137,72 @@ class TestChunkBoundaries:
     def test_empty_input_is_safe(self):
         det = make_detector()
         assert det.process(np.empty(0, dtype=np.float32)) == []
+
+
+import wave
+
+from event_detection import ClipRecorder, Event
+
+
+def feed_recorder(rec: ClipRecorder, samples: np.ndarray,
+                  event_at_chunk: int | None = None):
+    """Feed chunks; inject an Event at the given chunk index. Returns paths."""
+    paths = []
+    for idx in range(len(samples) // CHUNK):
+        chunk = samples[idx * CHUNK:(idx + 1) * CHUNK]
+        events = ([Event(timestamp=1751500000.0 + idx,
+                         peak_dbfs=-20.0, baseline_dbfs=-60.0)]
+                  if idx == event_at_chunk else [])
+        path = rec.process(chunk, events)
+        if path:
+            paths.append(path)
+    return paths
+
+
+class TestClipRecorder:
+    def test_writes_wav_with_exact_pre_plus_post_duration(self, tmp_path):
+        rec = ClipRecorder(sample_rate=SR, directory=tmp_path,
+                           pre_seconds=1.0, post_seconds=2.0)
+        audio = quiet(6.0)
+        (path,) = feed_recorder(rec, audio, event_at_chunk=30)  # t=3.0 s
+        with wave.open(str(path), "rb") as w:
+            assert w.getnframes() == int(SR * 3.0)  # 1 s pre + 2 s post
+            assert w.getframerate() == SR
+            assert w.getnchannels() == 1
+            assert w.getsampwidth() == 2  # 16-bit PCM
+
+    def test_no_event_writes_nothing(self, tmp_path):
+        rec = ClipRecorder(sample_rate=SR, directory=tmp_path)
+        assert feed_recorder(rec, quiet(5.0)) == []
+        assert list(tmp_path.glob("*.wav")) == []
+
+    def test_event_during_active_recording_is_absorbed(self, tmp_path):
+        rec = ClipRecorder(sample_rate=SR, directory=tmp_path,
+                           pre_seconds=0.5, post_seconds=1.0)
+        audio = quiet(6.0)
+        paths = []
+        for idx in range(len(audio) // CHUNK):
+            chunk = audio[idx * CHUNK:(idx + 1) * CHUNK]
+            # events at chunks 20 and 25: second falls inside first's post window
+            events = ([Event(1751500000.0 + idx, -20.0, -60.0)]
+                      if idx in (20, 25) else [])
+            if (p := rec.process(chunk, events)):
+                paths.append(p)
+        assert len(paths) == 1
+
+    def test_prunes_oldest_clips_beyond_max(self, tmp_path):
+        rec = ClipRecorder(sample_rate=SR, directory=tmp_path,
+                           pre_seconds=0.2, post_seconds=0.2, max_clips=2)
+        audio = quiet(20.0)
+        paths = []
+        for idx in range(len(audio) // CHUNK):
+            chunk = audio[idx * CHUNK:(idx + 1) * CHUNK]
+            # well-separated events at chunks 50, 100, 150
+            events = ([Event(1751500000.0 + idx, -20.0, -60.0)]
+                      if idx in (50, 100, 150) else [])
+            if (p := rec.process(chunk, events)):
+                paths.append(p)
+        assert len(paths) == 3
+        remaining = sorted(tmp_path.glob("*.wav"))
+        assert len(remaining) == 2
+        assert paths[0] not in remaining  # oldest was pruned

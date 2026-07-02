@@ -117,3 +117,87 @@ class EventDetector:
             self._cooldown = self.refractory_frames
         self._history.append(dbfs)
         self._recent.append(dbfs)
+
+
+class ClipRecorder:
+    """
+    Keeps a rolling pre-buffer of audio; when an event triggers, captures
+    pre_seconds before + post_seconds after into a 16-bit mono WAV named
+    ``YYYYmmdd_HHMMSS_<peak>dBFS.wav``. Events arriving while a clip is
+    already recording are absorbed into that clip. Oldest clips beyond
+    ``max_clips`` are deleted after each write (0 disables pruning).
+    """
+
+    def __init__(
+        self,
+        sample_rate: int,
+        directory: str | Path,
+        pre_seconds: float = 1.0,
+        post_seconds: float = 2.0,
+        max_clips: int = 200,
+    ) -> None:
+        self.sample_rate = sample_rate
+        self.directory = Path(directory)
+        self.pre_samples = int(sample_rate * pre_seconds)
+        self.post_samples = int(sample_rate * post_seconds)
+        self.max_clips = max_clips
+        self._pre: deque[np.ndarray] = deque()
+        self._pre_total = 0
+        self._pre_snapshot = np.empty(0, dtype=np.float32)
+        self._post: list[np.ndarray] = []
+        self._post_total = 0
+        self._event: Event | None = None
+
+    def process(self, samples: np.ndarray,
+                events: list[Event]) -> Path | None:
+        """Feed one chunk plus any events it triggered; returns the clip
+        path when a recording completes, else None."""
+        written = None
+        if self._event is None and events:
+            self._event = events[0]
+            if self._pre:
+                self._pre_snapshot = np.concatenate(
+                    list(self._pre))[-self.pre_samples:]
+            else:
+                self._pre_snapshot = np.empty(0, dtype=np.float32)
+
+        if self._event is not None:
+            # The chunk containing the trigger is the start of the post-roll.
+            self._post.append(samples)
+            self._post_total += len(samples)
+            if self._post_total >= self.post_samples:
+                written = self._write()
+                self._event = None
+                self._post = []
+                self._post_total = 0
+
+        self._pre.append(samples)
+        self._pre_total += len(samples)
+        while self._pre and (
+                self._pre_total - len(self._pre[0]) >= self.pre_samples):
+            self._pre_total -= len(self._pre.popleft())
+        return written
+
+    def _write(self) -> Path:
+        self.directory.mkdir(parents=True, exist_ok=True)
+        ts = time.strftime("%Y%m%d_%H%M%S",
+                           time.localtime(self._event.timestamp))
+        path = self.directory / f"{ts}_{self._event.peak_dbfs:.1f}dBFS.wav"
+        post = np.concatenate(self._post)[:self.post_samples]
+        data = np.concatenate([self._pre_snapshot, post])
+        pcm = (np.clip(data, -1.0, 1.0) * 32767).astype(np.int16)
+        with wave.open(str(path), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(self.sample_rate)
+            w.writeframes(pcm.tobytes())
+        log.info("Saved clip %s", path)
+        self._prune()
+        return path
+
+    def _prune(self) -> None:
+        if not self.max_clips:
+            return
+        clips = sorted(self.directory.glob("*.wav"))
+        for old in clips[:-self.max_clips]:
+            old.unlink()
