@@ -10,6 +10,13 @@ Continuously monitors ambient sound levels and publishes **mean and max dBFS** p
   - **Max dBFS** — loudest single chunk (captures transient pops)
 - Publishes both values to MQTT with Home Assistant auto-discovery
 - A derived **Pop Index** sensor (`max − mean`) flags minutes with likely pop/creak events
+- Detects discrete transient events on-device: each 10 ms frame is compared
+  against a rolling L90 noise baseline, and frames exceeding it by a threshold
+  trigger an event (with a refractory period so one pop counts once)
+- Publishes each event immediately (peak dBFS, dB over baseline) plus an
+  **events per minute** count alongside the minute stats
+- Optionally saves a WAV clip (1 s before + 2 s after) of every event to
+  `clips/` for ground-truth review
 
 ## Hardware
 
@@ -52,6 +59,18 @@ cp config.yaml.example config.yaml
 | `audio.chunk_seconds` | Size of each audio chunk fed into the buffer (default: `0.1`) |
 | `audio.device` | Device index from step 2, or `null` for system default |
 | `interval_seconds` | Reporting interval in seconds (default: `60`) |
+| `detection.enabled` | Enable on-device event detection (default: `true`) |
+| `detection.threshold_db` | dB above baseline required to trigger an event (default: `15`) |
+| `detection.refractory_seconds` | Minimum gap between distinct events (default: `0.2`) |
+| `detection.baseline_window_seconds` | Rolling window for the L90 baseline (default: `30`) |
+| `detection.min_trigger_dbfs` | Absolute floor below which triggers are ignored (default: `-70`) |
+| `clips.enabled` | Save a WAV clip per detected event (default: `true`) |
+| `clips.directory` | Where clips are written, gitignored (default: `clips`) |
+| `clips.pre_seconds` / `clips.post_seconds` | Audio kept around the trigger (default: `1.0` / `2.0`) |
+| `clips.max_clips` | Oldest clips beyond this count are deleted; `0` keeps all (default: `200`) |
+
+The `detection:` and `clips:` sections are optional — omit them entirely and
+the defaults above apply.
 
 ### 4. Test it
 
@@ -68,7 +87,13 @@ python3 sound_monitor.py --config /path/to/config.yaml
 
 You should see a log line every minute like:
 ```
-10:32:00  INFO      Published  mean=-51.3 dBFS  max=-34.7 dBFS
+10:32:00  INFO      Published  mean=-51.3 dBFS  max=-34.7 dBFS  events=0
+```
+
+and a line for each detected event as it happens:
+```
+10:32:14  INFO      Event  peak=-18.3 dBFS  (+41.2 dB over baseline)
+10:32:14  INFO      Saved clip clips/20260702_103214_-18.3dBFS.wav
 ```
 
 ### 5. Install as a systemd service
@@ -89,6 +114,11 @@ sudo journalctl -u sound_monitor -f
 ## Home Assistant
 
 Sensors appear automatically via MQTT discovery as soon as the script connects — no manual YAML needed for the core sensors.
+
+Four sensors are created: **Mean dBFS**, **Max dBFS**, **Events Per Minute**,
+and **Last Event Peak**. Each event is also published as JSON to
+`home/<device_id>/event` (`timestamp`, `peak_dbfs`, `baseline_dbfs`,
+`over_baseline_db`) for automations that want per-event triggers.
 
 The file `ha/sound_monitor.yaml` contains optional extras:
 
@@ -111,10 +141,15 @@ dBFS (decibels relative to full scale) is always ≤ 0. The absolute values depe
 ```
 ha-sound-monitor/
 ├── sound_monitor.py       # Main capture + MQTT publish script
+├── event_detection.py     # EventDetector + ClipRecorder (no hardware deps)
 ├── sound_monitor.service  # systemd unit for auto-start on boot
 ├── config.yaml.example    # Config template — copy to config.yaml and edit
 ├── config.yaml            # Your local config (gitignored, holds credentials)
 ├── requirements.txt
+├── requirements-dev.txt   # pytest, for running the test suite
+├── tests/
+│   └── test_event_detection.py
+├── clips/                 # Saved event WAVs (gitignored)
 ├── ha/
 │   └── sound_monitor.yaml # Optional HA template sensor, dashboard card, automation
 └── README.md
