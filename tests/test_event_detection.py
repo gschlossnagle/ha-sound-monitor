@@ -111,3 +111,29 @@ class TestSustainedNoise:
         # Onset may fire a few times before the median catches up,
         # but nothing after the first ~1 s of loud audio.
         assert 1 <= len(events) <= 5
+
+
+class TestChunkBoundaries:
+    def test_impulse_detected_regardless_of_chunk_size(self):
+        """The same audio fed in ragged chunks yields the same single event.
+
+        process() buffers residual samples across calls, so an impulse
+        straddling a chunk boundary must still fire exactly once.
+        """
+        audio = add_impulse(quiet(5.0), at_second=2.5)
+
+        det_big = make_detector()
+        big = run_detector(det_big, audio)  # clean 100 ms chunks
+
+        det_ragged = make_detector()
+        ragged = []
+        for i in range(0, len(audio), 37):  # odd size, never frame-aligned
+            ragged.extend(det_ragged.process(audio[i:i + 37]))
+
+        assert len(big) == 1
+        assert len(ragged) == 1
+        assert ragged[0].peak_dbfs == pytest.approx(big[0].peak_dbfs, abs=1.0)
+
+    def test_empty_input_is_safe(self):
+        det = make_detector()
+        assert det.process(np.empty(0, dtype=np.float32)) == []

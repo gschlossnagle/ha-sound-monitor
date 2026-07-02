@@ -22,7 +22,8 @@ class Event:
     """A detected transient sound event."""
 
     timestamp: float       # unix time at trigger
-    peak_dbfs: float       # loudest 10 ms frame RMS during the event
+    peak_dbfs: float       # loudest 10 ms frame; mutated in place while the
+                           # event is still live during its refractory period
     baseline_dbfs: float   # L90 baseline at trigger time
 
     @property
@@ -99,6 +100,11 @@ class EventDetector:
             self._cooldown -= 1
             if self._current_event and dbfs > self._current_event.peak_dbfs:
                 self._current_event.peak_dbfs = dbfs
+        # Trigger only when the frame clears ALL three gates: the slow L90
+        # baseline (ambient floor), the 1 s median (blocks sustained-noise
+        # onsets from storming while L90 catches up), and the absolute
+        # min_trigger floor. Loosening any one silently weakens storm
+        # suppression — see test_step_change_in_level_does_not_storm.
         elif (
             baseline is not None
             and recent is not None
