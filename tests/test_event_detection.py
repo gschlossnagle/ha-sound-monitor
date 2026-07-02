@@ -70,3 +70,26 @@ class TestBasicTriggering:
             np.zeros(int(SR * 3.0), dtype=np.float32),
             at_second=1.5, amplitude=0.0002)  # ~-77 dBFS, below floor
         assert run_detector(det, audio) == []
+
+
+class TestRefractoryAndPeak:
+    def test_impulses_within_refractory_count_as_one_event(self):
+        det = make_detector()  # default refractory 0.2 s
+        audio = add_impulse(quiet(5.0), at_second=2.5)
+        audio = add_impulse(audio, at_second=2.55)  # 50 ms later
+        assert len(run_detector(det, audio)) == 1
+
+    def test_impulses_outside_refractory_count_separately(self):
+        det = make_detector()
+        audio = add_impulse(quiet(5.0), at_second=2.5)
+        audio = add_impulse(audio, at_second=3.2)  # 700 ms later
+        assert len(run_detector(det, audio)) == 2
+
+    def test_peak_updated_by_louder_frame_during_refractory(self):
+        det = make_detector()
+        audio = add_impulse(quiet(5.0), at_second=2.5, amplitude=0.3)
+        audio = add_impulse(audio, at_second=2.55, amplitude=0.8)
+        (ev,) = run_detector(det, audio)
+        # 0.3-amplitude alone lands near -13 dBFS; the 0.8 follow-up
+        # should have raised the recorded peak well above that.
+        assert ev.peak_dbfs > -10.0
