@@ -6,43 +6,28 @@ Captures audio continuously, computes mean and max dBFS per 1-minute window,
 and publishes to MQTT with Home Assistant auto-discovery.
 
 Install dependencies:
-    pip3 install sounddevice numpy paho-mqtt
+    pip3 install -r requirements.txt
+
+Configure:
+    cp config.yaml.example config.yaml
+    # then edit config.yaml
 
 List available audio devices:
     python3 -c "import sounddevice; print(sounddevice.query_devices())"
 """
 
+import argparse
 import json
 import logging
 import time
+from pathlib import Path
 
 import numpy as np
 import paho.mqtt.client as mqtt
 import sounddevice as sd
+import yaml
 
-# ---------------------------------------------------------------------------
-# Configuration — edit these
-# ---------------------------------------------------------------------------
-MQTT_BROKER   = "192.168.1.x"      # IP of your HA / Mosquitto broker
-MQTT_PORT     = 1883
-MQTT_USER     = "mqtt_user"
-MQTT_PASSWORD = "mqtt_password"
-
-DEVICE_NAME   = "Living Room Sound Monitor"   # Friendly name shown in HA
-DEVICE_ID     = "sound_monitor_living_room"   # Unique ID (no spaces)
-TOPIC_BASE    = f"home/{DEVICE_ID}"
-
-# Audio settings
-SAMPLE_RATE      = 44100   # Hz — most USB mics support this
-CHANNELS         = 1
-CHUNK_SECONDS    = 0.1     # 100 ms chunks fed into the buffer
-INTERVAL_SECONDS = 60      # Publish every N seconds
-
-# Optional: pin to a specific input device index (leave None for system default)
-# Run: python3 -c "import sounddevice; print(sounddevice.query_devices())"
-# to find your device index.
-AUDIO_DEVICE = None
-# ---------------------------------------------------------------------------
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config.yaml"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,28 +36,63 @@ logging.basicConfig(
 )
 log = logging.getLogger("sound_monitor")
 
+REQUIRED_CONFIG_KEYS = {
+    "mqtt": ["broker", "port", "user", "password"],
+    "device": ["name", "id"],
+    "audio": ["sample_rate", "channels", "chunk_seconds", "device"],
+}
+
+
+def load_config(path: Path) -> dict:
+    """Load and validate the YAML config file."""
+    if not path.exists():
+        raise SystemExit(
+            f"Config file not found: {path}\n"
+            f"Copy config.yaml.example to {path.name} and fill in your values."
+        )
+
+    with path.open() as f:
+        config = yaml.safe_load(f)
+
+    for section, keys in REQUIRED_CONFIG_KEYS.items():
+        if section not in config:
+            raise SystemExit(f"Config missing section: {section}")
+        for key in keys:
+            if key not in config[section]:
+                raise SystemExit(f"Config missing key: {section}.{key}")
+
+    if "interval_seconds" not in config:
+        raise SystemExit("Config missing key: interval_seconds")
+
+    return config
+
 
 def rms_to_dbfs(rms: float) -> float:
     """Convert linear RMS amplitude [0, 1] to dBFS."""
     return 20.0 * np.log10(max(rms, 1e-10))
 
 
-def publish_discovery(client: mqtt.Client) -> None:
+def publish_discovery(client: mqtt.Client, config: dict) -> None:
     """Publish MQTT auto-discovery messages so HA creates sensors automatically."""
+    device_name = config["device"]["name"]
+    device_id = config["device"]["id"]
+    topic_base = f"home/{device_id}"
+    interval_seconds = config["interval_seconds"]
+
     device_block = {
-        "identifiers": [DEVICE_ID],
-        "name": DEVICE_NAME,
+        "identifiers": [device_id],
+        "name": device_name,
         "model": "Raspberry Pi Sound Monitor",
         "manufacturer": "DIY",
     }
 
     metrics = {
         "mean_dbfs": {
-            "name": f"{DEVICE_NAME} Mean dBFS",
+            "name": f"{device_name} Mean dBFS",
             "icon": "mdi:microphone",
         },
         "max_dbfs": {
-            "name": f"{DEVICE_NAME} Max dBFS",
+            "name": f"{device_name} Max dBFS",
             "icon": "mdi:microphone-plus",
         },
     }
@@ -80,33 +100,55 @@ def publish_discovery(client: mqtt.Client) -> None:
     for key, meta in metrics.items():
         payload = {
             "name": meta["name"],
-            "unique_id": f"{DEVICE_ID}_{key}",
-            "state_topic": f"{TOPIC_BASE}/{key}",
+            "unique_id": f"{device_id}_{key}",
+            "state_topic": f"{topic_base}/{key}",
             "unit_of_measurement": "dBFS",
             "icon": meta["icon"],
             "device": device_block,
             # Keep last value displayed until next update
-            "expire_after": INTERVAL_SECONDS * 3,
+            "expire_after": interval_seconds * 3,
         }
         client.publish(
-            f"homeassistant/sensor/{DEVICE_ID}/{key}/config",
+            f"homeassistant/sensor/{device_id}/{key}/config",
             json.dumps(payload),
             retain=True,
         )
         log.info("Published discovery for %s", key)
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG_PATH,
+        help=f"Path to config YAML file (default: {DEFAULT_CONFIG_PATH})",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = parse_args()
+    config = load_config(args.config)
+
+    device_id = config["device"]["id"]
+    topic_base = f"home/{device_id}"
+    interval_seconds = config["interval_seconds"]
+    sample_rate = config["audio"]["sample_rate"]
+    channels = config["audio"]["channels"]
+    chunk_seconds = config["audio"]["chunk_seconds"]
+    audio_device = config["audio"]["device"]
+
     # --- MQTT setup ---
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=DEVICE_ID)
-    client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
-    client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=device_id)
+    client.username_pw_set(config["mqtt"]["user"], config["mqtt"]["password"])
+    client.connect(config["mqtt"]["broker"], config["mqtt"]["port"], keepalive=60)
     client.loop_start()
 
-    publish_discovery(client)
+    publish_discovery(client, config)
 
     # --- Audio capture loop ---
-    chunk_size   = int(SAMPLE_RATE * CHUNK_SECONDS)
+    chunk_size   = int(sample_rate * chunk_seconds)
     audio_buffer: list[np.ndarray] = []
     window_start = time.monotonic()
 
@@ -117,15 +159,15 @@ def main() -> None:
 
     log.info(
         "Starting audio capture  (device=%s, rate=%d Hz, interval=%ds)",
-        AUDIO_DEVICE or "default",
-        SAMPLE_RATE,
-        INTERVAL_SECONDS,
+        audio_device or "default",
+        sample_rate,
+        interval_seconds,
     )
 
     with sd.InputStream(
-        device=AUDIO_DEVICE,
-        samplerate=SAMPLE_RATE,
-        channels=CHANNELS,
+        device=audio_device,
+        samplerate=sample_rate,
+        channels=channels,
         dtype="float32",
         blocksize=chunk_size,
         callback=on_audio,
@@ -134,7 +176,7 @@ def main() -> None:
             time.sleep(0.1)
 
             elapsed = time.monotonic() - window_start
-            if elapsed < INTERVAL_SECONDS:
+            if elapsed < interval_seconds:
                 continue
 
             # --- Process the collected window ---
@@ -160,8 +202,8 @@ def main() -> None:
             mean_db = round(20 * np.log10(max(mean_power, 1e-10)), 1)
             max_db  = round(float(np.max(chunk_db)), 1)
 
-            client.publish(f"{TOPIC_BASE}/mean_dbfs", mean_db)
-            client.publish(f"{TOPIC_BASE}/max_dbfs",  max_db)
+            client.publish(f"{topic_base}/mean_dbfs", mean_db)
+            client.publish(f"{topic_base}/max_dbfs",  max_db)
             log.info("Published  mean=%.1f dBFS  max=%.1f dBFS", mean_db, max_db)
 
 

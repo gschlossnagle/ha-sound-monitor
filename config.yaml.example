@@ -1,0 +1,27 @@
+# Sound monitor configuration.
+#
+# Copy this file to config.yaml and fill in your values:
+#   cp config.yaml.example config.yaml
+#
+# config.yaml is gitignored since it holds MQTT credentials.
+
+mqtt:
+  broker: 192.168.1.x        # IP of your HA / Mosquitto broker
+  port: 1883
+  user: mqtt_user
+  password: mqtt_password
+
+device:
+  name: "Living Room Sound Monitor"   # Friendly name shown in HA
+  id: sound_monitor_living_room       # Unique ID (no spaces), used for MQTT topics/entity IDs
+
+audio:
+  sample_rate: 44100     # Hz — most USB mics support this
+  channels: 1
+  chunk_seconds: 0.1     # 100 ms chunks fed into the buffer
+  # Pin to a specific input device index, or leave null for system default.
+  # Run: python3 -c "import sounddevice; print(sounddevice.query_devices())"
+  # to find your device index.
+  device: null
+
+interval_seconds: 60    # Publish every N seconds

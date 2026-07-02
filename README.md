@@ -32,21 +32,38 @@ python3 -c "import sounddevice; print(sounddevice.query_devices())"
 
 ### 3. Configure
 
-Edit the `Configuration` block at the top of `sound_monitor.py`:
+Copy the example config and fill in your values:
 
-| Variable | Description |
+```bash
+cp config.yaml.example config.yaml
+```
+
+`config.yaml` is gitignored since it holds MQTT credentials — never commit it.
+
+| Key | Description |
 |---|---|
-| `MQTT_BROKER` | IP address of your MQTT broker (usually your HA host) |
-| `MQTT_USER` / `MQTT_PASSWORD` | Credentials for your Mosquitto broker |
-| `DEVICE_NAME` | Friendly name shown in HA (e.g. `"Bedroom Sound Monitor"`) |
-| `DEVICE_ID` | Unique slug (no spaces) used for MQTT topics and entity IDs |
-| `AUDIO_DEVICE` | Device index from step 2, or `None` for system default |
-| `INTERVAL_SECONDS` | Reporting interval in seconds (default: `60`) |
+| `mqtt.broker` | IP address of your MQTT broker (usually your HA host) |
+| `mqtt.port` | MQTT broker port (default: `1883`) |
+| `mqtt.user` / `mqtt.password` | Credentials for your Mosquitto broker |
+| `device.name` | Friendly name shown in HA (e.g. `"Bedroom Sound Monitor"`) |
+| `device.id` | Unique slug (no spaces) used for MQTT topics and entity IDs |
+| `audio.sample_rate` | Sample rate in Hz (default: `44100`) |
+| `audio.channels` | Number of input channels (default: `1`) |
+| `audio.chunk_seconds` | Size of each audio chunk fed into the buffer (default: `0.1`) |
+| `audio.device` | Device index from step 2, or `null` for system default |
+| `interval_seconds` | Reporting interval in seconds (default: `60`) |
 
 ### 4. Test it
 
 ```bash
 python3 sound_monitor.py
+```
+
+By default the script looks for `config.yaml` next to the script. To use a
+config file elsewhere:
+
+```bash
+python3 sound_monitor.py --config /path/to/config.yaml
 ```
 
 You should see a log line every minute like:
@@ -58,7 +75,7 @@ You should see a log line every minute like:
 
 ```bash
 # Copy files
-cp sound_monitor.py /home/pi/
+cp sound_monitor.py config.yaml /home/pi/
 sudo cp sound_monitor.service /etc/systemd/system/
 
 # Enable and start
@@ -95,6 +112,8 @@ dBFS (decibels relative to full scale) is always ≤ 0. The absolute values depe
 ha-sound-monitor/
 ├── sound_monitor.py       # Main capture + MQTT publish script
 ├── sound_monitor.service  # systemd unit for auto-start on boot
+├── config.yaml.example    # Config template — copy to config.yaml and edit
+├── config.yaml            # Your local config (gitignored, holds credentials)
 ├── requirements.txt
 ├── ha/
 │   └── sound_monitor.yaml # Optional HA template sensor, dashboard card, automation
