@@ -155,7 +155,9 @@ def main() -> None:
                 if len(c) > 0
             ]
 
-            mean_db = round(float(np.mean(chunk_db)), 1)
+            # Leq: average power in linear domain, then convert back to dB
+            mean_power = float(np.mean([10 ** (db / 20) for db in chunk_db]))
+            mean_db = round(20 * np.log10(max(mean_power, 1e-10)), 1)
             max_db  = round(float(np.max(chunk_db)), 1)
 
             client.publish(f"{TOPIC_BASE}/mean_dbfs", mean_db)
