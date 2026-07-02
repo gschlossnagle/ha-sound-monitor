@@ -42,6 +42,23 @@ REQUIRED_CONFIG_KEYS = {
     "audio": ["sample_rate", "channels", "chunk_seconds", "device"],
 }
 
+# Optional sections — merged over these defaults if present in config.yaml.
+DETECTION_DEFAULTS = {
+    "enabled": True,
+    "frame_seconds": 0.01,
+    "threshold_db": 15.0,
+    "refractory_seconds": 0.2,
+    "baseline_window_seconds": 30.0,
+    "min_trigger_dbfs": -70.0,
+}
+CLIPS_DEFAULTS = {
+    "enabled": True,
+    "directory": "clips",
+    "pre_seconds": 1.0,
+    "post_seconds": 2.0,
+    "max_clips": 200,
+}
+
 
 def load_config(path: Path) -> dict:
     """Load and validate the YAML config file."""

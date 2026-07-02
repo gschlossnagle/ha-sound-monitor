@@ -25,3 +25,23 @@ audio:
   device: null
 
 interval_seconds: 60    # Publish every N seconds
+
+# Event detection — flags brief transients (pops/creaks) against the
+# ambient baseline. Optional: delete this section to disable; missing
+# keys fall back to the defaults shown.
+detection:
+  enabled: true
+  frame_seconds: 0.01           # analysis frame size (10 ms)
+  threshold_db: 15              # dB above baseline required to trigger
+  refractory_seconds: 0.2       # minimum gap between distinct events
+  baseline_window_seconds: 30   # rolling window for the L90 baseline
+  min_trigger_dbfs: -70         # absolute floor; ignore triggers below this
+
+# Clip capture — saves a short WAV around each detected event for
+# review. Optional; requires detection to be enabled.
+clips:
+  enabled: true
+  directory: clips              # created if missing, relative to cwd
+  pre_seconds: 1.0               # audio kept from before the trigger
+  post_seconds: 2.0             # audio recorded after the trigger
+  max_clips: 200                # delete oldest clips beyond this count (0 = keep all)
