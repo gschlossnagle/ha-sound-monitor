@@ -196,8 +196,10 @@ class ClipRecorder:
         return path
 
     def _prune(self) -> None:
+        # Match only our own output (``*dBFS.wav``) so unrelated WAV files
+        # sharing the directory neither count toward the cap nor get deleted.
         if not self.max_clips:
             return
-        clips = sorted(self.directory.glob("*.wav"))
+        clips = sorted(self.directory.glob("*dBFS.wav"))
         for old in clips[:-self.max_clips]:
             old.unlink()

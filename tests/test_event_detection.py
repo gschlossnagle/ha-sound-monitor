@@ -206,3 +206,19 @@ class TestClipRecorder:
         remaining = sorted(tmp_path.glob("*.wav"))
         assert len(remaining) == 2
         assert paths[0] not in remaining  # oldest was pruned
+
+    def test_pruning_ignores_unrelated_wav_files(self, tmp_path):
+        # A foreign .wav with a lexically-early name must not be counted
+        # toward max_clips nor deleted as the "oldest" clip.
+        foreign = tmp_path / "00000000_backup.wav"
+        foreign.write_bytes(b"not a real clip")
+        rec = ClipRecorder(sample_rate=SR, directory=tmp_path,
+                           pre_seconds=0.2, post_seconds=0.2, max_clips=2)
+        audio = quiet(20.0)
+        for idx in range(len(audio) // CHUNK):
+            chunk = audio[idx * CHUNK:(idx + 1) * CHUNK]
+            events = ([Event(1751500000.0 + idx, -20.0, -60.0)]
+                      if idx in (50, 100, 150) else [])
+            rec.process(chunk, events)
+        assert foreign.exists()  # untouched by pruning
+        assert len(list(tmp_path.glob("*dBFS.wav"))) == 2  # cap applies to ours
