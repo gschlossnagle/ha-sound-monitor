@@ -11,11 +11,17 @@ Run:
     python3 clip_viewer.py [--config config.yaml]
 """
 
+import argparse
+import html
 import logging
 import re
+import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+
+import yaml
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,6 +29,16 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("clip_viewer")
+
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config.yaml"
+
+# Optional viewer config — merged over these defaults if a `viewer:` section
+# is present in config.yaml.
+VIEWER_DEFAULTS = {
+    "enabled": True,
+    "host": "0.0.0.0",   # 0.0.0.0 = LAN-reachable; 127.0.0.1 = Pi only
+    "port": 8099,
+}
 
 # Matches ClipRecorder's output: YYYYmmdd_HHMMSS_<peak>dBFS.wav (peak may be
 # negative and fractional). Anchored with \A...\Z (not $, which would match
@@ -99,3 +115,156 @@ class ClipLibrary:
             # Raced with a concurrent prune by ClipRecorder — already gone.
             return False
         return True
+
+
+PAGE_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sound Monitor — Clips</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 720px;
+         margin: 1.5rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.3rem; }
+  .clip { border: 1px solid #ccc; border-radius: 8px;
+          padding: 0.75rem; margin: 0.75rem 0; }
+  .meta { display: flex; justify-content: space-between;
+          font-variant-numeric: tabular-nums; }
+  .peak { font-weight: 600; }
+  audio { width: 100%; margin: 0.5rem 0; }
+  .actions { display: flex; gap: 1rem; align-items: center; }
+  .empty { color: #666; }
+  button { cursor: pointer; }
+</style>
+</head>
+<body>
+<h1>Sound Monitor — Clips (__COUNT__)</h1>
+__BODY__
+</body>
+</html>
+"""
+
+
+def render_index(clips: list[ClipInfo]) -> str:
+    """Build the full HTML index page for the given clips."""
+    rows = []
+    for c in clips:
+        url = "/clips/" + urllib.parse.quote(c.name)
+        when = c.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+        rows.append(
+            '<div class="clip">'
+            f'<div class="meta"><span class="when">{html.escape(when)}</span>'
+            f'<span class="peak">{c.peak_dbfs:.1f} dBFS</span></div>'
+            f'<audio controls preload="none" src="{html.escape(url)}"></audio>'
+            '<div class="actions">'
+            f'<a href="{html.escape(url)}" download>Download</a>'
+            '<form method="post" action="/delete" '
+            "onsubmit=\"return confirm('Delete this clip?');\">"
+            f'<input type="hidden" name="name" value="{html.escape(c.name)}">'
+            '<button type="submit">Delete</button>'
+            "</form></div></div>"
+        )
+    body = "\n".join(rows) if rows else '<p class="empty">No clips yet.</p>'
+    return PAGE_TEMPLATE.replace("__COUNT__", str(len(clips))).replace(
+        "__BODY__", body
+    )
+
+
+def make_handler(library: ClipLibrary) -> type[BaseHTTPRequestHandler]:
+    """Build a request handler bound to the given ClipLibrary."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            path = urllib.parse.urlparse(self.path).path
+            if path == "/":
+                self._send_html(render_index(library.list_clips()))
+            elif path.startswith("/clips/"):
+                name = urllib.parse.unquote(path[len("/clips/"):])
+                self._serve_clip(name)
+            else:
+                self.send_error(404)
+
+        def do_POST(self) -> None:
+            if urllib.parse.urlparse(self.path).path != "/delete":
+                self.send_error(404)
+                return
+            length = int(self.headers.get("Content-Length", 0))
+            params = urllib.parse.parse_qs(self.rfile.read(length).decode())
+            library.delete((params.get("name") or [""])[0])
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.end_headers()
+
+        def _serve_clip(self, name: str) -> None:
+            path = library.resolve(name)
+            if path is None:
+                self.send_error(404)
+                return
+            data = path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/wav")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def _send_html(self, markup: str) -> None:
+            body = markup.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, fmt: str, *args) -> None:
+            log.info("%s %s", self.address_string(), fmt % args)
+
+    return Handler
+
+
+def load_viewer_config(path: Path) -> dict:
+    """Read the shared config.yaml for the clips dir and viewer settings."""
+    if not path.exists():
+        raise SystemExit(
+            f"Config file not found: {path}\n"
+            f"The viewer reads the same {path.name} as sound_monitor.py."
+        )
+    with path.open() as f:
+        config = yaml.safe_load(f) or {}
+    clips_directory = (config.get("clips") or {}).get("directory", "clips")
+    viewer = {**VIEWER_DEFAULTS, **(config.get("viewer") or {})}
+    return {"clips_directory": clips_directory, "viewer": viewer}
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG_PATH,
+        help=f"Path to config YAML file (default: {DEFAULT_CONFIG_PATH})",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    config = load_viewer_config(args.config)
+    vcfg = config["viewer"]
+    if not vcfg["enabled"]:
+        log.info("Viewer disabled (viewer.enabled=false); exiting.")
+        return
+    library = ClipLibrary(config["clips_directory"])
+    server = HTTPServer((vcfg["host"], vcfg["port"]), make_handler(library))
+    log.info(
+        "Serving clips from %s  at http://%s:%d/",
+        library.directory, vcfg["host"], vcfg["port"],
+    )
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        log.info("Stopped.")
+
+
+if __name__ == "__main__":
+    main()
