@@ -195,6 +195,7 @@ ha-sound-monitor/
 │   ├── test_event_detection.py
 │   └── test_clip_viewer.py
 ├── clips/                 # Saved event WAVs (gitignored)
+├── docs/                  # Design specs and implementation plans
 ├── ha/
 │   └── sound_monitor.yaml # Optional HA template sensor, dashboard card, automation
 └── README.md
