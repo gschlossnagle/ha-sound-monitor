@@ -60,6 +60,7 @@ cp config.yaml.example config.yaml
 | `audio.device` | Device index from step 2, or `null` for system default |
 | `interval_seconds` | Reporting interval in seconds (default: `60`) |
 | `detection.enabled` | Enable on-device event detection (default: `true`) |
+| `detection.frame_seconds` | Analysis frame size in seconds (default: `0.01` = 10 ms) |
 | `detection.threshold_db` | dB above baseline required to trigger an event (default: `15`) |
 | `detection.refractory_seconds` | Minimum gap between distinct events (default: `0.2`) |
 | `detection.baseline_window_seconds` | Rolling window for the L90 baseline (default: `30`) |
@@ -119,6 +120,11 @@ Four sensors are created: **Mean dBFS**, **Max dBFS**, **Events Per Minute**,
 and **Last Event Peak**. Each event is also published as JSON to
 `home/<device_id>/event` (`timestamp`, `peak_dbfs`, `baseline_dbfs`,
 `over_baseline_db`) for automations that want per-event triggers.
+
+Note: the event JSON and the **Last Event Peak** sensor report the peak at the
+moment the event triggered. A saved clip's filename may show a slightly higher
+peak, since a louder frame arriving within the refractory window updates the
+clip's recorded peak but not the already-published event.
 
 The file `ha/sound_monitor.yaml` contains optional extras:
 

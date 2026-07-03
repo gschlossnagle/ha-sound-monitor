@@ -303,12 +303,17 @@ def main() -> None:
             mean_db = round(20 * np.log10(max(mean_power, 1e-10)), 1)
             max_db  = round(float(np.max(chunk_db)), 1)
 
+            # Normalize the interval's event count to a per-minute rate so the
+            # "Events Per Minute" sensor stays truthful when interval_seconds
+            # != 60. At the default 60 s interval this equals the raw count.
+            events_per_min = round(event_count * 60 / interval_seconds, 1)
+
             client.publish(f"{topic_base}/mean_dbfs", mean_db)
             client.publish(f"{topic_base}/max_dbfs",  max_db)
-            client.publish(f"{topic_base}/events_per_minute", event_count)
+            client.publish(f"{topic_base}/events_per_minute", events_per_min)
             log.info(
-                "Published  mean=%.1f dBFS  max=%.1f dBFS  events=%d",
-                mean_db, max_db, event_count,
+                "Published  mean=%.1f dBFS  max=%.1f dBFS  events=%d (%.1f/min)",
+                mean_db, max_db, event_count, events_per_min,
             )
             event_count = 0
 
