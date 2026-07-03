@@ -15,6 +15,9 @@ Continuously monitors ambient sound levels and publishes **mean and max dBFS** p
   trigger an event (with a refractory period so one pop counts once)
 - Publishes each event immediately (peak dBFS, dB over baseline) plus an
   **events per minute** count alongside the minute stats
+- Publishes the detector's **L90 baseline** (the ambient floor, exceeded 90%
+  of the time) as its own sensor — a spike-immune companion to Mean dBFS,
+  since a percentile ignores the loud transients an energy average would absorb
 - Optionally saves a WAV clip (1 s before + 2 s after) of every event to
   `clips/` for ground-truth review
 
@@ -92,8 +95,10 @@ python3 sound_monitor.py --config /path/to/config.yaml
 
 You should see a log line every minute like:
 ```
-10:32:00  INFO      Published  mean=-51.3 dBFS  max=-34.7 dBFS  events=0
+10:32:00  INFO      Published  mean=-51.3  max=-34.7  baseline=-54.8 dBFS  events=0 (0.0/min)
 ```
+(`baseline` shows `n/a` for the first minute while the detector warms up, or
+whenever detection is disabled.)
 
 and a line for each detected event as it happens:
 ```
@@ -120,8 +125,12 @@ sudo journalctl -u sound_monitor -f
 
 Sensors appear automatically via MQTT discovery as soon as the script connects — no manual YAML needed for the core sensors.
 
-Four sensors are created: **Mean dBFS**, **Max dBFS**, **Events Per Minute**,
-and **Last Event Peak**. Each event is also published as JSON to
+Up to five sensors are created: **Mean dBFS**, **Max dBFS**, **Events Per
+Minute**, **Last Event Peak**, and — when detection is enabled — **Baseline
+dBFS** (the L90 ambient floor). Baseline dBFS is the spike-immune counterpart
+to Mean dBFS: a quiet room reads the same on it whether or not pops occurred
+that minute, so comparing the two (or watching Max rise above Baseline) is a
+clean way to spot transient activity. Each event is also published as JSON to
 `home/<device_id>/event` (`timestamp`, `peak_dbfs`, `baseline_dbfs`,
 `over_baseline_db`) for automations that want per-event triggers.
 

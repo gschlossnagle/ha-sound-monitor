@@ -93,8 +93,15 @@ def rms_to_dbfs(rms: float) -> float:
     return 20.0 * np.log10(max(rms, 1e-10))
 
 
-def publish_discovery(client: mqtt.Client, config: dict) -> None:
-    """Publish MQTT auto-discovery messages so HA creates sensors automatically."""
+def publish_discovery(
+    client: mqtt.Client, config: dict, detection_enabled: bool
+) -> None:
+    """Publish MQTT auto-discovery messages so HA creates sensors automatically.
+
+    ``detection_enabled`` gates the detector-derived sensors: the L90
+    ``baseline_dbfs`` floor is only meaningful (and only ever published)
+    when the event detector is running.
+    """
     device_name = config["device"]["name"]
     device_id = config["device"]["id"]
     topic_base = f"home/{device_id}"
@@ -133,6 +140,16 @@ def publish_discovery(client: mqtt.Client, config: dict) -> None:
             "no_expire": True,
         },
     }
+
+    if detection_enabled:
+        # L90 ambient floor (10th-percentile level over the detector's rolling
+        # window). Unlike Mean dBFS (an energy average that loud pops drag up),
+        # this reads the quiet floor and stays put during transients.
+        metrics["baseline_dbfs"] = {
+            "name": f"{device_name} Baseline dBFS",
+            "icon": "mdi:microphone-minus",
+            "unit": "dBFS",
+        }
 
     for key, meta in metrics.items():
         payload = {
@@ -185,11 +202,13 @@ def main() -> None:
     client.connect(config["mqtt"]["broker"], config["mqtt"]["port"], keepalive=60)
     client.loop_start()
 
-    publish_discovery(client, config)
-
     # --- Event detection setup ---
+    # Resolve detection config before discovery so we know whether to
+    # advertise the detector-derived baseline_dbfs sensor.
     det_cfg = {**DETECTION_DEFAULTS, **config.get("detection", {})}
     clips_cfg = {**CLIPS_DEFAULTS, **config.get("clips", {})}
+
+    publish_discovery(client, config, det_cfg["enabled"])
 
     detector = None
     recorder = None
@@ -310,12 +329,20 @@ def main() -> None:
             # != 60. At the default 60 s interval this equals the raw count.
             events_per_min = round(event_count * 60 / interval_seconds, 1)
 
+            # L90 ambient floor from the detector (None during the first
+            # second of warmup, or when detection is disabled).
+            baseline_db = detector.baseline_dbfs if detector else None
+
             client.publish(f"{topic_base}/mean_dbfs", mean_db)
             client.publish(f"{topic_base}/max_dbfs",  max_db)
             client.publish(f"{topic_base}/events_per_minute", events_per_min)
+            if baseline_db is not None:
+                client.publish(f"{topic_base}/baseline_dbfs", round(baseline_db, 1))
             log.info(
-                "Published  mean=%.1f dBFS  max=%.1f dBFS  events=%d (%.1f/min)",
-                mean_db, max_db, event_count, events_per_min,
+                "Published  mean=%.1f  max=%.1f  baseline=%s dBFS  events=%d (%.1f/min)",
+                mean_db, max_db,
+                f"{baseline_db:.1f}" if baseline_db is not None else "n/a",
+                event_count, events_per_min,
             )
             event_count = 0
 
