@@ -216,6 +216,36 @@ works too:
 rsync -av pi@<pi-address>:~/clips/ ./clips/
 ```
 
+## Troubleshooting
+
+Deploying to a real Pi surfaces a predictable sequence of host-specific
+issues. These are the ones you're most likely to hit, in roughly the order
+they appear, with the symptom in the journal and the fix.
+
+| Symptom (in `journalctl -u sound_monitor`) | Cause | Fix |
+|---|---|---|
+| `status=217/USER`, "Failed to determine user credentials" | The unit's `User=` doesn't exist on this host (it ships as `pi`) | Edit `User=`, `WorkingDirectory=`, and the `ExecStart=` venv path in `/etc/systemd/system/*.service` to match your host, then `sudo systemctl daemon-reload` |
+| `status=203/EXEC` | `ExecStart=` points at a venv/python path that doesn't exist | Confirm the venv was created at that exact path and `ExecStart` matches it |
+| `error: externally-managed-environment` on `pip install` | Pi OS (PEP 668) forbids system-wide pip | Install into a venv: `python3 -m venv venv && venv/bin/pip install -r requirements.txt` |
+| `ModuleNotFoundError: No module named 'yaml'` / `'sounddevice'` | Service is running system Python, not the venv | Re-copy the updated `.service` (its `ExecStart` uses `/home/pi/venv/bin/python`), `daemon-reload`, restart |
+| `PortAudioError: Error querying device -1` | No default input device — `audio.device: null` finds nothing under a headless service (no sound-server session) | Pin the mic explicitly, e.g. `audio.device: "ATR4697"` (a substring of its name) or `"hw:1,0"` |
+| `arecord -l` as the service user says "no soundcards found" | The service user isn't in the `audio` group, so `/dev/snd/*` is unreadable | `sudo usermod -aG audio <user>` then restart the service (no reboot needed) |
+| `arecord -l` shows the card but `Subdevices: 0/1`, and `query_devices()` omits it | The mic is busy — another process (often a desktop PipeWire/PulseAudio session) holds it open | `sudo fuser -v /dev/snd/pcmC*c` to find the holder and stop it; re-check for `1/1` |
+| `Unknown key 'StartLimitIntervalSec' in section [Service], ignoring` | `StartLimit*` keys were placed under `[Service]` | Move them to `[Unit]` (fixed in the shipped unit as of the current version) |
+
+To confirm the mic a service will actually use, always enumerate **as the
+service user**, not your login shell — the two can differ:
+
+```bash
+sudo -u pi arecord -l                                              # hardware capture devices
+sudo -u pi /home/pi/venv/bin/python -c "import sounddevice as sd; print(sd.query_devices())"
+```
+
+For the clip viewer specifically: if the page won't load, first check whether
+anything is even listening — `sudo ss -ltnp | grep 8099`. Nothing there means
+the service failed before binding (check `journalctl -u clip_viewer`), not a
+network/firewall problem.
+
 ## Project structure
 
 ```
