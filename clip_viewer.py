@@ -186,6 +186,9 @@ def make_handler(library: ClipLibrary) -> type[BaseHTTPRequestHandler]:
                 self.send_error(404)
 
         def do_POST(self) -> None:
+            # LAN-open with no auth: any device on the network can POST here.
+            # No CSRF token by design (there's no session to protect); the
+            # mitigation is network trust, or binding host to 127.0.0.1.
             if urllib.parse.urlparse(self.path).path != "/delete":
                 self.send_error(404)
                 return
@@ -201,7 +204,14 @@ def make_handler(library: ClipLibrary) -> type[BaseHTTPRequestHandler]:
             if path is None:
                 self.send_error(404)
                 return
-            data = path.read_bytes()
+            try:
+                data = path.read_bytes()
+            except (FileNotFoundError, OSError):
+                # Raced with a concurrent prune by ClipRecorder — treat as gone.
+                self.send_error(404)
+                return
+            # Whole file into memory, no HTTP Range support: fine for the small
+            # (few-hundred-KB) WAVs these clips are; a refresh recovers from a race.
             self.send_response(200)
             self.send_header("Content-Type", "audio/wav")
             self.send_header("Content-Length", str(len(data)))
