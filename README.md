@@ -30,14 +30,23 @@ Continuously monitors ambient sound levels and publishes **mean and max dBFS** p
 
 ### 1. Install dependencies
 
+Raspberry Pi OS marks the system Python as "externally managed" (PEP 668),
+so `pip3 install` system-wide is refused. Install into a virtual environment
+instead:
+
 ```bash
-pip3 install -r requirements.txt
+python3 -m venv venv
+venv/bin/pip install -r requirements.txt
 ```
+
+The rest of this guide calls `venv/bin/python` directly so nothing depends on
+having the venv activated. If you'd rather activate it, run
+`source venv/bin/activate` and then plain `python`/`pip` work as usual.
 
 ### 2. Find your microphone's device index
 
 ```bash
-python3 -c "import sounddevice; print(sounddevice.query_devices())"
+venv/bin/python -c "import sounddevice; print(sounddevice.query_devices())"
 ```
 
 ### 3. Configure
@@ -83,14 +92,14 @@ the defaults above apply.
 ### 4. Test it
 
 ```bash
-python3 sound_monitor.py
+venv/bin/python sound_monitor.py
 ```
 
 By default the script looks for `config.yaml` next to the script. To use a
 config file elsewhere:
 
 ```bash
-python3 sound_monitor.py --config /path/to/config.yaml
+venv/bin/python sound_monitor.py --config /path/to/config.yaml
 ```
 
 You should see a log line every minute like:
@@ -109,17 +118,29 @@ and a line for each detected event as it happens:
 ### 5. Install as a systemd service
 
 ```bash
-# Copy files
-cp sound_monitor.py config.yaml /home/pi/
-sudo cp sound_monitor.service /etc/systemd/system/
+# Copy the app files (event_detection.py is imported by sound_monitor.py,
+# and requirements.txt is needed to build the venv on the Pi)
+cp sound_monitor.py event_detection.py requirements.txt config.yaml /home/pi/
 
-# Enable and start
+# Build the venv at its final location — a venv is not relocatable, so it
+# must be created on the Pi, in the directory the service will run from
+python3 -m venv /home/pi/venv
+/home/pi/venv/bin/pip install -r /home/pi/requirements.txt
+
+# Install and start the service
+sudo cp sound_monitor.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now sound_monitor
 
 # Check status
 sudo journalctl -u sound_monitor -f
 ```
+
+The unit ships with `User=pi` and paths under `/home/pi`. **On any other host
+(different username or home directory) edit `User=`, `WorkingDirectory=`, and
+the venv path in `ExecStart=` in `/etc/systemd/system/sound_monitor.service`
+to match, then `sudo systemctl daemon-reload`** — a mismatch there is what
+produces a `status=217/USER` failure at startup.
 
 ## Home Assistant
 
@@ -161,15 +182,17 @@ When clip capture is enabled, `clip_viewer.py` serves the saved WAVs as a
 simple web page so you can review them from any device on your LAN — list
 newest-first, play inline, download, or delete false positives.
 
-Run it on the Pi:
+Run it on the Pi (uses the same venv as the monitor):
 
 ```bash
-python3 clip_viewer.py
+venv/bin/python clip_viewer.py
 ```
 
 then open `http://<pi-address>:8099/` in a browser.
 
-To keep it always available, install it as a service (alongside the main one):
+To keep it always available, install it as a service (alongside the main one).
+It reuses the monitor's venv and `/home/pi` deploy directory, so there are no
+extra dependencies to install:
 
 ```bash
 cp clip_viewer.py /home/pi/
@@ -179,7 +202,8 @@ sudo systemctl enable --now clip_viewer
 ```
 
 It reads the same `config.yaml` as the monitor (using `clips.directory`), so
-no extra setup is needed beyond the optional `viewer:` section.
+no extra setup is needed beyond the optional `viewer:` section. (As with the
+main service, adjust `User=`/paths in the unit for non-Pi hosts.)
 
 Prefer to pull clips off the Pi instead of browsing in place? A plain rsync
 works too:

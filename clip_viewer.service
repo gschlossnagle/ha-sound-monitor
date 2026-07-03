@@ -5,9 +5,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# On non-Raspberry-Pi hosts the `pi` user and /home/pi may not exist; edit
+# User, WorkingDirectory, and the venv path in ExecStart to match your host
+# (a mismatch here fails at startup with status=217/USER).
 User=pi
 WorkingDirectory=/home/pi
-ExecStart=/usr/bin/python3 /home/pi/clip_viewer.py
+# Reuses the monitor's virtualenv (see sound_monitor.service).
+ExecStart=/home/pi/venv/bin/python /home/pi/clip_viewer.py
 Restart=always
 RestartSec=10
 

@@ -5,9 +5,16 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# On non-Raspberry-Pi hosts the `pi` user and /home/pi may not exist; edit
+# User, WorkingDirectory, and the venv path in ExecStart to match your host
+# (a mismatch here fails at startup with status=217/USER).
 User=pi
 WorkingDirectory=/home/pi
-ExecStart=/usr/bin/python3 /home/pi/sound_monitor.py
+# Runs from a virtualenv — Pi OS forbids system-wide pip installs (PEP 668).
+# Create it once with:
+#   python3 -m venv /home/pi/venv
+#   /home/pi/venv/bin/pip install -r /home/pi/requirements.txt
+ExecStart=/home/pi/venv/bin/python /home/pi/sound_monitor.py
 Restart=always
 RestartSec=10
 # Give the audio subsystem time to settle after login
