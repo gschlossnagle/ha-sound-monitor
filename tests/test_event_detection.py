@@ -222,3 +222,56 @@ class TestClipRecorder:
             rec.process(chunk, events)
         assert foreign.exists()  # untouched by pruning
         assert len(list(tmp_path.glob("*dBFS.wav"))) == 2  # cap applies to ours
+
+
+class TestStorageCap:
+    """Byte-size cap on the clips directory, evicting oldest-first."""
+
+    def _make_clips(self, tmp_path, count, size):
+        """Create `count` clip files of `size` bytes each, chronologically named
+        oldest-first; returns the paths in that (ascending) order."""
+        paths = []
+        for i in range(count):
+            p = tmp_path / f"2026070{i + 1}_120000_-10.0dBFS.wav"
+            p.write_bytes(b"x" * size)
+            paths.append(p)
+        return paths
+
+    def test_size_cap_evicts_oldest_until_under(self, tmp_path):
+        rec = ClipRecorder(sample_rate=SR, directory=tmp_path, max_clips=0)
+        rec.max_storage_bytes = 250
+        paths = self._make_clips(tmp_path, count=4, size=100)  # 400 bytes total
+        rec._prune()
+        remaining = sorted(tmp_path.glob("*dBFS.wav"))
+        assert sum(p.stat().st_size for p in remaining) <= 250
+        assert remaining == paths[2:]  # kept newest 2, evicted oldest 2
+
+    def test_size_cap_zero_disables(self, tmp_path):
+        rec = ClipRecorder(sample_rate=SR, directory=tmp_path, max_clips=0)
+        rec.max_storage_bytes = 0
+        self._make_clips(tmp_path, count=5, size=1000)
+        rec._prune()
+        assert len(list(tmp_path.glob("*dBFS.wav"))) == 5
+
+    def test_both_caps_evict_to_satisfy_both(self, tmp_path):
+        # count cap alone would keep 3, but the tighter size cap keeps fewer
+        rec = ClipRecorder(sample_rate=SR, directory=tmp_path, max_clips=3)
+        rec.max_storage_bytes = 150  # only one 100-byte clip fits
+        paths = self._make_clips(tmp_path, count=5, size=100)
+        rec._prune()
+        remaining = sorted(tmp_path.glob("*dBFS.wav"))
+        assert remaining == paths[4:]  # kept newest 1
+
+    def test_default_max_storage_is_1gb(self, tmp_path):
+        rec = ClipRecorder(sample_rate=SR, directory=tmp_path)
+        assert rec.max_storage_bytes == 1000 * 1_000_000
+
+    def test_size_cap_ignores_foreign_wavs(self, tmp_path):
+        rec = ClipRecorder(sample_rate=SR, directory=tmp_path, max_clips=0)
+        rec.max_storage_bytes = 50
+        foreign = tmp_path / "backup.wav"
+        foreign.write_bytes(b"x" * 10_000)
+        self._make_clips(tmp_path, count=1, size=10)
+        rec._prune()
+        assert foreign.exists()  # not counted, not deleted
+        assert len(list(tmp_path.glob("*dBFS.wav"))) == 1
