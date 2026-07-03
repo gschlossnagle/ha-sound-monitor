@@ -66,6 +66,21 @@ class TestPathSafety:
         p = ClipLibrary(tmp_path).resolve("20260702_103214_-18.3dBFS.wav")
         assert p is not None and p.name == "20260702_103214_-18.3dBFS.wav"
 
+    def test_resolve_rejects_trailing_newline(self, tmp_path):
+        # \A...\Z anchoring (not $) must reject a name with a trailing newline
+        # even when a same-stem real clip exists.
+        make_clip(tmp_path, "20260702_103214_-18.3dBFS.wav")
+        assert ClipLibrary(tmp_path).resolve("20260702_103214_-18.3dBFS.wav\n") is None
+
+    def test_resolve_rejects_clip_named_symlink_escaping_dir(self, tmp_path):
+        # A clip-named symlink pointing outside the directory must be rejected:
+        # resolve() follows the link, so its parent is no longer the base dir.
+        outside = tmp_path.parent / "outside_secret.txt"
+        outside.write_text("secret")
+        link = tmp_path / "20260702_103214_-1.0dBFS.wav"
+        link.symlink_to(outside)
+        assert ClipLibrary(tmp_path).resolve("20260702_103214_-1.0dBFS.wav") is None
+
 
 class TestDelete:
     def test_delete_removes_real_clip(self, tmp_path):
@@ -87,3 +102,11 @@ class TestDelete:
 
     def test_delete_missing_returns_false(self, tmp_path):
         assert ClipLibrary(tmp_path).delete("20260702_103214_-1.0dBFS.wav") is False
+
+    def test_delete_refuses_clip_named_symlink_escaping_dir(self, tmp_path):
+        outside = tmp_path.parent / "outside_secret.txt"
+        outside.write_text("secret")
+        link = tmp_path / "20260702_103214_-1.0dBFS.wav"
+        link.symlink_to(outside)
+        assert ClipLibrary(tmp_path).delete("20260702_103214_-1.0dBFS.wav") is False
+        assert outside.exists()

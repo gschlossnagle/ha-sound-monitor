@@ -25,9 +25,10 @@ logging.basicConfig(
 log = logging.getLogger("clip_viewer")
 
 # Matches ClipRecorder's output: YYYYmmdd_HHMMSS_<peak>dBFS.wav (peak may be
-# negative and fractional). Anchored + no path separators allowed, so a
-# traversal or absolute path can never match — this is the primary path guard.
-_CLIP_RE = re.compile(r"^(\d{8}_\d{6})_(-?\d+(?:\.\d+)?)dBFS\.wav$")
+# negative and fractional). Anchored with \A...\Z (not $, which would match
+# before a trailing newline) and no path separators allowed, so a traversal or
+# absolute path can never match — this is the primary path guard.
+_CLIP_RE = re.compile(r"\A(\d{8}_\d{6})_(-?\d+(?:\.\d+)?)dBFS\.wav\Z")
 
 
 @dataclass
@@ -92,5 +93,9 @@ class ClipLibrary:
         path = self.resolve(name)
         if path is None:
             return False
-        path.unlink()
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            # Raced with a concurrent prune by ClipRecorder — already gone.
+            return False
         return True
