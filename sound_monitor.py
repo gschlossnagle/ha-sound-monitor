@@ -60,6 +60,7 @@ CLIPS_DEFAULTS = {
     "pre_seconds": 1.0,
     "post_seconds": 2.0,
     "max_clips": 200,
+    "max_storage_mb": 1000,
 }
 
 
@@ -208,6 +209,7 @@ def main() -> None:
                 pre_seconds=clips_cfg["pre_seconds"],
                 post_seconds=clips_cfg["post_seconds"],
                 max_clips=clips_cfg["max_clips"],
+                max_storage_mb=clips_cfg["max_storage_mb"],
             )
         log.info(
             "Event detection on  (threshold=+%.0f dB, clips=%s)",
