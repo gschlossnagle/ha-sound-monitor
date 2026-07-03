@@ -124,8 +124,10 @@ class ClipRecorder:
     Keeps a rolling pre-buffer of audio; when an event triggers, captures
     pre_seconds before + post_seconds after into a 16-bit mono WAV named
     ``YYYYmmdd_HHMMSS_<peak>dBFS.wav``. Events arriving while a clip is
-    already recording are absorbed into that clip. Oldest clips beyond
-    ``max_clips`` are deleted after each write (0 disables pruning).
+    already recording are absorbed into that clip. After each write, oldest
+    clips are evicted until BOTH caps hold: at most ``max_clips`` files
+    (0 = unlimited) and at most ``max_storage_mb`` megabytes total on disk
+    (0 = unlimited). ``max_storage_mb`` defaults to ~1 GB.
     """
 
     def __init__(
@@ -135,12 +137,14 @@ class ClipRecorder:
         pre_seconds: float = 1.0,
         post_seconds: float = 2.0,
         max_clips: int = 200,
+        max_storage_mb: float = 1000,
     ) -> None:
         self.sample_rate = sample_rate
         self.directory = Path(directory)
         self.pre_samples = int(sample_rate * pre_seconds)
         self.post_samples = int(sample_rate * post_seconds)
         self.max_clips = max_clips
+        self.max_storage_bytes = int(max_storage_mb * 1_000_000)
         self._pre: deque[np.ndarray] = deque()
         self._pre_total = 0
         self._pre_snapshot = np.empty(0, dtype=np.float32)
@@ -197,9 +201,27 @@ class ClipRecorder:
 
     def _prune(self) -> None:
         # Match only our own output (``*dBFS.wav``) so unrelated WAV files
-        # sharing the directory neither count toward the cap nor get deleted.
-        if not self.max_clips:
+        # sharing the directory neither count toward the caps nor get deleted.
+        # Evict oldest-first (filenames sort chronologically) until BOTH the
+        # count cap and the byte cap are satisfied; 0 disables either cap.
+        if not self.max_clips and not self.max_storage_bytes:
             return
-        clips = sorted(self.directory.glob("*dBFS.wav"))
-        for old in clips[:-self.max_clips]:
-            old.unlink()
+        entries = []
+        for path in sorted(self.directory.glob("*dBFS.wav")):
+            try:
+                entries.append((path, path.stat().st_size))
+            except FileNotFoundError:
+                continue  # vanished (e.g. deleted via the viewer) — skip
+        total = sum(size for _, size in entries)
+        count = len(entries)
+        for path, size in entries:
+            over_count = self.max_clips and count > self.max_clips
+            over_size = self.max_storage_bytes and total > self.max_storage_bytes
+            if not over_count and not over_size:
+                break
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            total -= size
+            count -= 1

@@ -69,6 +69,7 @@ cp config.yaml.example config.yaml
 | `clips.directory` | Where clips are written, gitignored (default: `clips`) |
 | `clips.pre_seconds` / `clips.post_seconds` | Audio kept around the trigger (default: `1.0` / `2.0`) |
 | `clips.max_clips` | Oldest clips beyond this count are deleted; `0` keeps all (default: `200`) |
+| `clips.max_storage_mb` | Oldest clips are deleted to keep the `clips/` dir under this size in MB; `0` disables (default: `1000` ≈ 1 GB) |
 | `viewer.enabled` | Run the clip-review web UI (default: `true`) |
 | `viewer.host` | Bind address — `0.0.0.0` for LAN, `127.0.0.1` for Pi-only (default: `0.0.0.0`) |
 | `viewer.port` | Port for the clip viewer (default: `8099`) |

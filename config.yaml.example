@@ -45,6 +45,7 @@ clips:
   pre_seconds: 1.0               # audio kept from before the trigger
   post_seconds: 2.0             # audio recorded after the trigger
   max_clips: 200                # delete oldest clips beyond this count (0 = keep all)
+  max_storage_mb: 1000          # delete oldest clips to stay under this size (0 = no limit)
 
 # Clip viewer — a small LAN web UI (clip_viewer.py) for reviewing saved
 # clips: list newest-first, play inline, download, delete. Optional; the
