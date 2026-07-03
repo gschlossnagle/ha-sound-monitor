@@ -69,6 +69,9 @@ cp config.yaml.example config.yaml
 | `clips.directory` | Where clips are written, gitignored (default: `clips`) |
 | `clips.pre_seconds` / `clips.post_seconds` | Audio kept around the trigger (default: `1.0` / `2.0`) |
 | `clips.max_clips` | Oldest clips beyond this count are deleted; `0` keeps all (default: `200`) |
+| `viewer.enabled` | Run the clip-review web UI (default: `true`) |
+| `viewer.host` | Bind address — `0.0.0.0` for LAN, `127.0.0.1` for Pi-only (default: `0.0.0.0`) |
+| `viewer.port` | Port for the clip viewer (default: `8099`) |
 
 The `detection:` and `clips:` sections are optional — omit them entirely and
 the defaults above apply.
@@ -142,19 +145,55 @@ dBFS (decibels relative to full scale) is always ≤ 0. The absolute values depe
 | Background noise (HVAC, etc.) | −45 dBFS | −40 dBFS | ~5 dB |
 | Single loud pop | −55 dBFS | −25 dBFS | ~30 dB |
 
+## Reviewing clips
+
+When clip capture is enabled, `clip_viewer.py` serves the saved WAVs as a
+simple web page so you can review them from any device on your LAN — list
+newest-first, play inline, download, or delete false positives.
+
+Run it on the Pi:
+
+```bash
+python3 clip_viewer.py
+```
+
+then open `http://<pi-address>:8099/` in a browser.
+
+To keep it always available, install it as a service (alongside the main one):
+
+```bash
+cp clip_viewer.py /home/pi/
+sudo cp clip_viewer.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now clip_viewer
+```
+
+It reads the same `config.yaml` as the monitor (using `clips.directory`), so
+no extra setup is needed beyond the optional `viewer:` section.
+
+Prefer to pull clips off the Pi instead of browsing in place? A plain rsync
+works too:
+
+```bash
+rsync -av pi@<pi-address>:~/clips/ ./clips/
+```
+
 ## Project structure
 
 ```
 ha-sound-monitor/
 ├── sound_monitor.py       # Main capture + MQTT publish script
 ├── event_detection.py     # EventDetector + ClipRecorder (no hardware deps)
-├── sound_monitor.service  # systemd unit for auto-start on boot
+├── clip_viewer.py         # LAN web UI for reviewing saved clips
+├── sound_monitor.service  # systemd unit for the capture service
+├── clip_viewer.service    # systemd unit for the clip viewer
 ├── config.yaml.example    # Config template — copy to config.yaml and edit
 ├── config.yaml            # Your local config (gitignored, holds credentials)
 ├── requirements.txt
 ├── requirements-dev.txt   # pytest, for running the test suite
 ├── tests/
-│   └── test_event_detection.py
+│   ├── test_event_detection.py
+│   └── test_clip_viewer.py
 ├── clips/                 # Saved event WAVs (gitignored)
 ├── ha/
 │   └── sound_monitor.yaml # Optional HA template sensor, dashboard card, automation
