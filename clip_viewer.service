@@ -1,0 +1,20 @@
+[Unit]
+Description=Sound Monitor Clip Viewer (web UI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi
+ExecStart=/usr/bin/python3 /home/pi/clip_viewer.py
+Restart=always
+RestartSec=10
+
+# Keep stdout/stderr in the journal:
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=clip_viewer
+
+[Install]
+WantedBy=multi-user.target
