@@ -19,6 +19,7 @@ List available audio devices:
 import argparse
 import json
 import logging
+import queue
 import time
 from pathlib import Path
 
@@ -26,6 +27,8 @@ import numpy as np
 import paho.mqtt.client as mqtt
 import sounddevice as sd
 import yaml
+
+from event_detection import ClipRecorder, EventDetector
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config.yaml"
 
@@ -40,6 +43,23 @@ REQUIRED_CONFIG_KEYS = {
     "mqtt": ["broker", "port", "user", "password"],
     "device": ["name", "id"],
     "audio": ["sample_rate", "channels", "chunk_seconds", "device"],
+}
+
+# Optional sections — merged over these defaults if present in config.yaml.
+DETECTION_DEFAULTS = {
+    "enabled": True,
+    "frame_seconds": 0.01,
+    "threshold_db": 15.0,
+    "refractory_seconds": 0.2,
+    "baseline_window_seconds": 30.0,
+    "min_trigger_dbfs": -70.0,
+}
+CLIPS_DEFAULTS = {
+    "enabled": True,
+    "directory": "clips",
+    "pre_seconds": 1.0,
+    "post_seconds": 2.0,
+    "max_clips": 200,
 }
 
 
@@ -90,10 +110,26 @@ def publish_discovery(client: mqtt.Client, config: dict) -> None:
         "mean_dbfs": {
             "name": f"{device_name} Mean dBFS",
             "icon": "mdi:microphone",
+            "unit": "dBFS",
         },
         "max_dbfs": {
             "name": f"{device_name} Max dBFS",
             "icon": "mdi:microphone-plus",
+            "unit": "dBFS",
+        },
+        "events_per_minute": {
+            "name": f"{device_name} Events Per Minute",
+            "icon": "mdi:pulse",
+            "unit": "events/min",
+        },
+        "last_event_peak": {
+            "name": f"{device_name} Last Event Peak",
+            "icon": "mdi:waveform",
+            "unit": "dBFS",
+            "state_topic": f"{topic_base}/event",
+            "value_template": "{{ value_json.peak_dbfs }}",
+            # A pop an hour ago is still the last event — never expire.
+            "no_expire": True,
         },
     }
 
@@ -101,13 +137,16 @@ def publish_discovery(client: mqtt.Client, config: dict) -> None:
         payload = {
             "name": meta["name"],
             "unique_id": f"{device_id}_{key}",
-            "state_topic": f"{topic_base}/{key}",
-            "unit_of_measurement": "dBFS",
+            "state_topic": meta.get("state_topic", f"{topic_base}/{key}"),
+            "unit_of_measurement": meta["unit"],
             "icon": meta["icon"],
             "device": device_block,
-            # Keep last value displayed until next update
-            "expire_after": interval_seconds * 3,
         }
+        if "value_template" in meta:
+            payload["value_template"] = meta["value_template"]
+        if not meta.get("no_expire"):
+            # Keep last value displayed until next update
+            payload["expire_after"] = interval_seconds * 3
         client.publish(
             f"homeassistant/sensor/{device_id}/{key}/config",
             json.dumps(payload),
@@ -147,15 +186,48 @@ def main() -> None:
 
     publish_discovery(client, config)
 
+    # --- Event detection setup ---
+    det_cfg = {**DETECTION_DEFAULTS, **config.get("detection", {})}
+    clips_cfg = {**CLIPS_DEFAULTS, **config.get("clips", {})}
+
+    detector = None
+    recorder = None
+    if det_cfg["enabled"]:
+        detector = EventDetector(
+            sample_rate=sample_rate,
+            frame_seconds=det_cfg["frame_seconds"],
+            threshold_db=det_cfg["threshold_db"],
+            refractory_seconds=det_cfg["refractory_seconds"],
+            baseline_window_seconds=det_cfg["baseline_window_seconds"],
+            min_trigger_dbfs=det_cfg["min_trigger_dbfs"],
+        )
+        if clips_cfg["enabled"]:
+            recorder = ClipRecorder(
+                sample_rate=sample_rate,
+                directory=clips_cfg["directory"],
+                pre_seconds=clips_cfg["pre_seconds"],
+                post_seconds=clips_cfg["post_seconds"],
+                max_clips=clips_cfg["max_clips"],
+            )
+        log.info(
+            "Event detection on  (threshold=+%.0f dB, clips=%s)",
+            det_cfg["threshold_db"],
+            clips_cfg["directory"] if recorder else "off",
+        )
+
     # --- Audio capture loop ---
-    chunk_size   = int(sample_rate * chunk_seconds)
-    audio_buffer: list[np.ndarray] = []
+    chunk_size = int(sample_rate * chunk_seconds)
+    # Unbounded is safe: the 0.1s drain loop far outpaces the ~10 chunks/s
+    # producer, and paho's loop_start() keeps client.publish() non-blocking.
+    audio_queue: queue.Queue[np.ndarray] = queue.Queue()
+    window_buffer: list[np.ndarray] = []
     window_start = time.monotonic()
+    event_count = 0
 
     def on_audio(indata: np.ndarray, frames: int, time_info, status) -> None:
         if status:
             log.warning("Audio stream status: %s", status)
-        audio_buffer.append(indata[:, 0].copy())  # keep mono channel
+        audio_queue.put(indata[:, 0].copy())  # keep mono channel
 
     log.info(
         "Starting audio capture  (device=%s, rate=%d Hz, interval=%ds)",
@@ -175,17 +247,46 @@ def main() -> None:
         while True:
             time.sleep(0.1)
 
+            # Drain the queue: feed minute stats and the event detector.
+            while True:
+                try:
+                    chunk = audio_queue.get_nowait()
+                except queue.Empty:
+                    break
+                window_buffer.append(chunk)
+                events = detector.process(chunk) if detector else []
+                for ev in events:
+                    event_count += 1
+                    # peak_dbfs here is the trigger-instant value. The clip
+                    # filename uses ev.peak_dbfs after refractory updates, so
+                    # a louder follow-up frame can make the two disagree.
+                    client.publish(
+                        f"{topic_base}/event",
+                        json.dumps({
+                            "timestamp": ev.timestamp,
+                            "peak_dbfs": round(ev.peak_dbfs, 1),
+                            "baseline_dbfs": round(ev.baseline_dbfs, 1),
+                            "over_baseline_db": round(ev.over_baseline_db, 1),
+                        }),
+                    )
+                    log.info(
+                        "Event  peak=%.1f dBFS  (+%.1f dB over baseline)",
+                        ev.peak_dbfs, ev.over_baseline_db,
+                    )
+                if recorder:
+                    recorder.process(chunk, events)
+
             elapsed = time.monotonic() - window_start
             if elapsed < interval_seconds:
                 continue
 
             # --- Process the collected window ---
-            if not audio_buffer:
+            if not window_buffer:
                 window_start = time.monotonic()
                 continue
 
-            all_samples = np.concatenate(audio_buffer)
-            audio_buffer.clear()
+            all_samples = np.concatenate(window_buffer)
+            window_buffer.clear()
             window_start = time.monotonic()
 
             # Split into 100 ms chunks, compute per-chunk dBFS, then aggregate
@@ -202,9 +303,19 @@ def main() -> None:
             mean_db = round(20 * np.log10(max(mean_power, 1e-10)), 1)
             max_db  = round(float(np.max(chunk_db)), 1)
 
+            # Normalize the interval's event count to a per-minute rate so the
+            # "Events Per Minute" sensor stays truthful when interval_seconds
+            # != 60. At the default 60 s interval this equals the raw count.
+            events_per_min = round(event_count * 60 / interval_seconds, 1)
+
             client.publish(f"{topic_base}/mean_dbfs", mean_db)
             client.publish(f"{topic_base}/max_dbfs",  max_db)
-            log.info("Published  mean=%.1f dBFS  max=%.1f dBFS", mean_db, max_db)
+            client.publish(f"{topic_base}/events_per_minute", events_per_min)
+            log.info(
+                "Published  mean=%.1f dBFS  max=%.1f dBFS  events=%d (%.1f/min)",
+                mean_db, max_db, event_count, events_per_min,
+            )
+            event_count = 0
 
 
 if __name__ == "__main__":
