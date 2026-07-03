@@ -123,11 +123,18 @@ class ClipRecorder:
     """
     Keeps a rolling pre-buffer of audio; when an event triggers, captures
     pre_seconds before + post_seconds after into a 16-bit mono WAV named
-    ``YYYYmmdd_HHMMSS_<peak>dBFS.wav``. Events arriving while a clip is
-    already recording are absorbed into that clip. After each write, oldest
-    clips are evicted until BOTH caps hold: at most ``max_clips`` files
-    (0 = unlimited) and at most ``max_storage_mb`` megabytes total on disk
-    (0 = unlimited). ``max_storage_mb`` defaults to ~1 GB.
+    ``YYYYmmdd_HHMMSS_<peak>dBFS.wav``.
+
+    Events arriving while a clip is already recording are absorbed into that
+    clip AND *re-arm* the post-roll — so a flurry of pops yields one clip that
+    runs ``post_seconds`` past the LAST pop, not the first. ``max_clip_seconds``
+    caps how long one clip's post-roll can grow (0 = unlimited) so a continuous
+    racket can't record forever. The clip is named after the loudest pop it
+    contains.
+
+    After each write, oldest clips are evicted until BOTH caps hold: at most
+    ``max_clips`` files (0 = unlimited) and at most ``max_storage_mb`` megabytes
+    total on disk (0 = unlimited). ``max_storage_mb`` defaults to ~1 GB.
     """
 
     def __init__(
@@ -138,11 +145,14 @@ class ClipRecorder:
         post_seconds: float = 2.0,
         max_clips: int = 200,
         max_storage_mb: float = 1000,
+        max_clip_seconds: float = 60.0,
     ) -> None:
         self.sample_rate = sample_rate
         self.directory = Path(directory)
         self.pre_samples = int(sample_rate * pre_seconds)
         self.post_samples = int(sample_rate * post_seconds)
+        # Ceiling on one clip's post-roll; 0 disables the cap.
+        self.max_post_samples = int(sample_rate * max_clip_seconds)
         self.max_clips = max_clips
         self.max_storage_bytes = int(max_storage_mb * 1_000_000)
         self._pre: deque[np.ndarray] = deque()
@@ -150,6 +160,7 @@ class ClipRecorder:
         self._pre_snapshot = np.empty(0, dtype=np.float32)
         self._post: list[np.ndarray] = []
         self._post_total = 0
+        self._since_last = 0   # samples since the most recent (re-arming) pop
         self._event: Event | None = None
 
     def process(self, samples: np.ndarray,
@@ -158,22 +169,39 @@ class ClipRecorder:
         path when a recording completes, else None."""
         written = None
         if self._event is None and events:
+            # First pop: start a clip and snapshot the pre-roll buffer.
             self._event = events[0]
+            self._since_last = 0
             if self._pre:
                 self._pre_snapshot = np.concatenate(
                     list(self._pre))[-self.pre_samples:]
             else:
                 self._pre_snapshot = np.empty(0, dtype=np.float32)
+        elif self._event is not None and events:
+            # Absorbed pop(s): re-arm the post-roll from here so the clip runs
+            # post_seconds past the LAST pop, and keep the loudest peak for the
+            # filename.
+            self._since_last = 0
+            for ev in events:
+                if ev.peak_dbfs > self._event.peak_dbfs:
+                    self._event.peak_dbfs = ev.peak_dbfs
 
         if self._event is not None:
             # The chunk containing the trigger is the start of the post-roll.
             self._post.append(samples)
             self._post_total += len(samples)
-            if self._post_total >= self.post_samples:
+            self._since_last += len(samples)
+            # Close the clip once the post-roll has run post_seconds past the
+            # most recent pop, or the overall cap is hit (whichever first).
+            tail_done = self._since_last >= self.post_samples
+            hit_cap = (self.max_post_samples
+                       and self._post_total >= self.max_post_samples)
+            if tail_done or hit_cap:
                 written = self._write()
                 self._event = None
                 self._post = []
                 self._post_total = 0
+                self._since_last = 0
 
         self._pre.append(samples)
         self._pre_total += len(samples)
@@ -187,7 +215,11 @@ class ClipRecorder:
         ts = time.strftime("%Y%m%d_%H%M%S",
                            time.localtime(self._event.timestamp))
         path = self.directory / f"{ts}_{self._event.peak_dbfs:.1f}dBFS.wav"
-        post = np.concatenate(self._post)[:self.post_samples]
+        # Keep the full (possibly flurry-extended) post-roll, bounded only by
+        # the safety cap — NOT trimmed back to post_samples.
+        post = np.concatenate(self._post)
+        if self.max_post_samples:
+            post = post[:self.max_post_samples]
         data = np.concatenate([self._pre_snapshot, post])
         pcm = (np.clip(data, -1.0, 1.0) * 32767).astype(np.int16)
         with wave.open(str(path), "wb") as w:

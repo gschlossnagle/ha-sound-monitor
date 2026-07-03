@@ -224,6 +224,63 @@ class TestClipRecorder:
         assert len(list(tmp_path.glob("*dBFS.wav"))) == 2  # cap applies to ours
 
 
+class TestFlurryExtension:
+    """Extend-on-absorb: the post-roll re-arms from the most recent pop, so a
+    flurry lands in one clip that runs post_seconds past the LAST pop, bounded
+    by max_clip_seconds."""
+
+    def _run(self, rec, audio, event_chunks, peaks=None):
+        paths = []
+        for idx in range(len(audio) // CHUNK):
+            chunk = audio[idx * CHUNK:(idx + 1) * CHUNK]
+            events = []
+            if idx in event_chunks:
+                peak = -20.0 if peaks is None else peaks[event_chunks.index(idx)]
+                events = [Event(1751500000.0 + idx, peak, -60.0)]
+            if (p := rec.process(chunk, events)):
+                paths.append(p)
+        return paths
+
+    def test_single_pop_unaffected(self, tmp_path):
+        rec = ClipRecorder(sample_rate=SR, directory=tmp_path,
+                           pre_seconds=0.5, post_seconds=1.0)
+        (path,) = self._run(rec, quiet(6.0), event_chunks=[20])
+        with wave.open(str(path), "rb") as w:
+            assert w.getnframes() == int(SR * 1.5)  # 0.5 pre + 1.0 post
+
+    def test_absorbed_pop_extends_post_roll_past_last_pop(self, tmp_path):
+        rec = ClipRecorder(sample_rate=SR, directory=tmp_path,
+                           pre_seconds=0.5, post_seconds=1.0)
+        # pops at chunk 20 (t=2.0) and chunk 25 (t=2.5), 0.5 s apart
+        (path,) = self._run(rec, quiet(8.0), event_chunks=[20, 25])
+        with wave.open(str(path), "rb") as w:
+            # 0.5 pre + (0.5 gap + 1.0 tail from the LAST pop) = 2.0 s total
+            assert w.getnframes() == int(SR * 2.0)
+
+    def test_max_clip_seconds_caps_a_runaway_flurry(self, tmp_path):
+        rec = ClipRecorder(sample_rate=SR, directory=tmp_path,
+                           pre_seconds=0.2, post_seconds=1.0,
+                           max_clip_seconds=1.0)
+        # a pop every 2 chunks (0.2 s) keeps re-arming the post-roll; the cap
+        # must force a write at 1.0 s of post-roll from the first pop.
+        (path,) = self._run(rec, quiet(8.0),
+                            event_chunks=[20, 22, 24, 26, 28])
+        with wave.open(str(path), "rb") as w:
+            assert w.getnframes() == int(SR * 1.2)  # 0.2 pre + 1.0 cap
+
+    def test_clip_named_after_loudest_pop_in_flurry(self, tmp_path):
+        rec = ClipRecorder(sample_rate=SR, directory=tmp_path,
+                           pre_seconds=0.5, post_seconds=1.0)
+        # second pop is louder; filename should reflect it, not the first
+        (path,) = self._run(rec, quiet(8.0), event_chunks=[20, 25],
+                            peaks=[-20.0, -5.0])
+        assert "-5.0dBFS.wav" in path.name
+
+    def test_max_clip_seconds_default_is_60s(self, tmp_path):
+        rec = ClipRecorder(sample_rate=SR, directory=tmp_path)
+        assert rec.max_post_samples == int(SR * 60.0)
+
+
 class TestStorageCap:
     """Byte-size cap on the clips directory, evicting oldest-first."""
 

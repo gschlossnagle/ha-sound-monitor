@@ -19,7 +19,9 @@ Continuously monitors ambient sound levels and publishes **mean and max dBFS** p
   of the time) as its own sensor — a spike-immune companion to Mean dBFS,
   since a percentile ignores the loud transients an energy average would absorb
 - Optionally saves a WAV clip (1 s before + 2 s after) of every event to
-  `clips/` for ground-truth review
+  `clips/` for ground-truth review. A flurry of pops close together is kept in
+  a single clip that extends to 2 s past the last pop (bounded by
+  `max_clip_seconds`) and is named after the loudest pop it contains
 
 ## Hardware
 
@@ -79,7 +81,9 @@ cp config.yaml.example config.yaml
 | `detection.min_trigger_dbfs` | Absolute floor below which triggers are ignored (default: `-70`) |
 | `clips.enabled` | Save a WAV clip per detected event (default: `true`) |
 | `clips.directory` | Where clips are written, gitignored (default: `clips`) |
-| `clips.pre_seconds` / `clips.post_seconds` | Audio kept around the trigger (default: `1.0` / `2.0`) |
+| `clips.pre_seconds` | Audio kept before the first pop (default: `1.0`) |
+| `clips.post_seconds` | Audio kept after the *last* pop in a flurry (default: `2.0`) |
+| `clips.max_clip_seconds` | Ceiling on one clip's post-roll so a long flurry can't record forever; `0` disables (default: `60`) |
 | `clips.max_clips` | Oldest clips beyond this count are deleted; `0` keeps all (default: `200`) |
 | `clips.max_storage_mb` | Oldest clips are deleted to keep the `clips/` dir under this size in MB; `0` disables (default: `1000` ≈ 1 GB) |
 | `viewer.enabled` | Run the clip-review web UI (default: `true`) |

@@ -42,8 +42,10 @@ detection:
 clips:
   enabled: true
   directory: clips              # created if missing, relative to cwd
-  pre_seconds: 1.0               # audio kept from before the trigger
-  post_seconds: 2.0             # audio recorded after the trigger
+  pre_seconds: 1.0               # audio kept from before the FIRST pop
+  post_seconds: 2.0             # audio kept after the LAST pop in a flurry
+  max_clip_seconds: 60          # hard ceiling on one clip's post-roll; a long
+                                # flurry stops extending here (0 = no cap)
   max_clips: 200                # delete oldest clips beyond this count (0 = keep all)
   max_storage_mb: 1000          # delete oldest clips to stay under this size (0 = no limit)
 
