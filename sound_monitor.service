@@ -2,6 +2,10 @@
 Description=Sound Level Monitor (Home Assistant MQTT)
 After=network-online.target
 Wants=network-online.target
+# Stop retrying if the service crash-loops (more than 5 starts in 120s).
+# These are [Unit] directives — systemd ignores them under [Service].
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -17,9 +21,6 @@ WorkingDirectory=/home/pi
 ExecStart=/home/pi/venv/bin/python /home/pi/sound_monitor.py
 Restart=always
 RestartSec=10
-# Give the audio subsystem time to settle after login
-StartLimitIntervalSec=120
-StartLimitBurst=5
 
 # Keep stdout/stderr in the journal:
 StandardOutput=journal
