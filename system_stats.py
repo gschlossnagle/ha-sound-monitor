@@ -93,7 +93,7 @@ def collect_stats(pid: int) -> SystemStats:
     swap_percent = None
     try:
         swap_percent = psutil.swap_memory().percent
-    except psutil.Error as exc:
+    except (psutil.Error, OSError) as exc:
         log.warning("Failed to read swap stats: %s", exc)
 
     disk_free_percent = None
