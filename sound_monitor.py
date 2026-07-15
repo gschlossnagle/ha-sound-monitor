@@ -28,7 +28,7 @@ import paho.mqtt.client as mqtt
 import sounddevice as sd
 import yaml
 
-from event_detection import ClipRecorder, EventDetector
+from event_detection import ClipRecorder, EventDetector, enqueue_or_drop
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config.yaml"
 
@@ -213,9 +213,13 @@ def run_stream(
     # the caller reopens it rather than publishing silence forever.
     watchdog_seconds = interval_seconds * 2
 
-    # Unbounded is safe: the 0.1s drain loop far outpaces the producer, and
-    # paho's loop_start() keeps client.publish() non-blocking.
-    audio_queue: queue.Queue[np.ndarray] = queue.Queue()
+    # Bounded so a stalled consumer (CPU contention, a slow disk write) can't
+    # grow the queue without limit — on a Pi Zero's ~426 MB that turns into
+    # swap-thrashing rather than a few dropped chunks. 60s of headroom is
+    # generous versus the normal drain rate but caps backlog memory at a
+    # few MB regardless of how long a stall lasts.
+    queue_capacity = max(1, int(60 / chunk_seconds))
+    audio_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=queue_capacity)
     window_buffer: list[np.ndarray] = []
     window_start = time.monotonic()
     last_audio = time.monotonic()
@@ -225,7 +229,7 @@ def run_stream(
         nonlocal last_audio
         if status:
             log.warning("Audio stream status: %s", status)
-        audio_queue.put(indata[:, 0].copy())  # keep mono channel
+        enqueue_or_drop(audio_queue, indata[:, 0].copy(), log)  # keep mono channel
         last_audio = time.monotonic()
 
     log.info(

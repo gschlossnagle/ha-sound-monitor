@@ -6,6 +6,7 @@ unit-tested on machines without audio hardware.
 """
 
 import logging
+import queue
 import time
 import wave
 from collections import deque
@@ -15,6 +16,26 @@ from pathlib import Path
 import numpy as np
 
 log = logging.getLogger("sound_monitor.events")
+
+
+def enqueue_or_drop(q: "queue.Queue", item, logger: logging.Logger) -> bool:
+    """Try to enqueue ``item`` without blocking; drop it (with a warning) if
+    the queue is full rather than growing it without bound.
+
+    The audio callback thread feeds this queue faster than a stalled
+    consumer (CPU contention, a slow disk write) can drain it. An unbounded
+    queue turns that stall into unbounded memory growth -- on a Pi Zero,
+    into swap-thrashing the SD card. Dropping a chunk loses a slice of
+    monitoring data; an OOM does far worse. Returns True if enqueued.
+    """
+    try:
+        q.put_nowait(item)
+        return True
+    except queue.Full:
+        logger.warning(
+            "Audio queue full (%d items) — dropping a chunk; the consumer "
+            "is falling behind", q.qsize())
+        return False
 
 
 @dataclass
@@ -68,13 +89,26 @@ class EventDetector:
         self._cooldown = 0
         self._current_event: Event | None = None
         self._clock = clock
+        # The L90 baseline is a "slow" 30 s rolling stat, but recomputing its
+        # O(n) percentile from scratch on every 10 ms frame (100x/sec) was
+        # the dominant CPU cost in this module -- confirmed by profiling to
+        # be why a Pi Zero running this pegs a full core. Refresh it on a
+        # coarser cadence instead; the L90 floor doesn't move fast enough
+        # for frame-level freshness to matter.
+        self._baseline_refresh_frames = max(1, int(0.1 / frame_seconds))
+        self._frames_since_baseline_refresh = 0
+        self._baseline_cache: float | None = None
 
     @property
     def baseline_dbfs(self) -> float | None:
-        """L90 (level exceeded 90% of the time); None until 1 s of history."""
+        """L90 (level exceeded 90% of the time); None until 1 s of history.
+
+        Cached and refreshed roughly every 0.1 s of audio (see ``_step``)
+        rather than on every frame.
+        """
         if len(self._history) < self._min_history:
             return None
-        return float(np.percentile(self._history, 10))
+        return self._baseline_cache
 
     def process(self, samples: np.ndarray) -> list[Event]:
         """Feed raw float32 samples; return events triggered in this batch."""
@@ -90,6 +124,12 @@ class EventDetector:
         return events
 
     def _step(self, dbfs: float, events: list[Event]) -> None:
+        if len(self._history) >= self._min_history and (
+            self._baseline_cache is None
+            or self._frames_since_baseline_refresh >= self._baseline_refresh_frames
+        ):
+            self._baseline_cache = float(np.percentile(self._history, 10))
+            self._frames_since_baseline_refresh = 0
         baseline = self.baseline_dbfs
         recent = (
             float(np.median(self._recent))
@@ -117,6 +157,7 @@ class EventDetector:
             self._cooldown = self.refractory_frames
         self._history.append(dbfs)
         self._recent.append(dbfs)
+        self._frames_since_baseline_refresh += 1
 
 
 class ClipRecorder:

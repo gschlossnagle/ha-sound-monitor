@@ -113,6 +113,31 @@ class TestSustainedNoise:
         assert 1 <= len(events) <= 5
 
 
+class TestBaselineCachingPerformance:
+    """The L90 baseline is documented as a 'slow' 30 s rolling stat, but was
+    being recomputed via np.percentile on every single 10 ms frame (100x/sec)
+    -- confirmed by profiling to be the dominant CPU cost in this module,
+    and the reason a Pi Zero running this pegs a full core. It should be
+    refreshed on a coarser cadence instead."""
+
+    def test_percentile_recomputed_far_less_than_once_per_frame(self, monkeypatch):
+        calls = {"n": 0}
+        real_percentile = np.percentile
+
+        def counting_percentile(*args, **kwargs):
+            calls["n"] += 1
+            return real_percentile(*args, **kwargs)
+
+        monkeypatch.setattr(np, "percentile", counting_percentile)
+
+        det = make_detector()
+        run_detector(det, quiet(5.0))  # ~500 frames, ~400 of them post-warmup
+
+        # Recomputing at ~10 Hz instead of the full 100 Hz frame rate should
+        # keep this well under half the post-warmup frame count.
+        assert calls["n"] < 200
+
+
 class TestChunkBoundaries:
     def test_impulse_detected_regardless_of_chunk_size(self):
         """The same audio fed in ragged chunks yields the same single event.
@@ -139,9 +164,31 @@ class TestChunkBoundaries:
         assert det.process(np.empty(0, dtype=np.float32)) == []
 
 
+import logging
+import queue
 import wave
 
-from event_detection import ClipRecorder, Event
+from event_detection import ClipRecorder, Event, enqueue_or_drop
+
+
+class TestEnqueueOrDrop:
+    """The audio callback thread feeds a queue the main loop drains. If the
+    consumer ever falls behind (CPU contention, a slow disk write), nothing
+    should let that queue grow without bound -- on a Pi Zero with ~426 MB of
+    RAM, an unbounded backlog is exactly what forces heavy swapping."""
+
+    def test_enqueues_when_space_available(self):
+        q: queue.Queue = queue.Queue(maxsize=2)
+        assert enqueue_or_drop(q, "chunk", logging.getLogger(__name__)) is True
+        assert q.qsize() == 1
+
+    def test_drops_and_returns_false_when_full(self):
+        q: queue.Queue = queue.Queue(maxsize=1)
+        q.put_nowait("first")
+        dropped = enqueue_or_drop(q, "second", logging.getLogger(__name__))
+        assert dropped is False
+        assert q.qsize() == 1
+        assert q.get_nowait() == "first"  # the original item, not overwritten
 
 
 def feed_recorder(rec: ClipRecorder, samples: np.ndarray,
