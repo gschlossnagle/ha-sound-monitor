@@ -159,6 +159,16 @@ clean way to spot transient activity. Each event is also published as JSON to
 `home/<device_id>/event` (`timestamp`, `peak_dbfs`, `baseline_dbfs`,
 `over_baseline_db`) for automations that want per-event triggers.
 
+Independent of the audio pipeline, `sound_monitor` also publishes its own
+resource usage and board health every `system.interval_seconds` (default
+60s): **CPU %** and **Memory MB** (the `sound_monitor` process itself),
+**Core Voltage**, **CPU Temp**, **Swap Used %**, **Load Average (1m)**,
+**SD Card Free %**, and a binary **Under-Voltage** sensor. These publish on
+their own thread, decoupled from the audio watchdog, so they keep
+reporting even if the audio stream itself is stalled or restarting.
+Requires `vcgencmd` (present on Raspberry Pi OS); set `system.enabled:
+false` in `config.yaml` if running this off a Pi.
+
 Note: the event JSON and the **Last Event Peak** sensor report the peak at the
 moment the event triggered. A saved clip's filename may show a slightly higher
 peak, since a louder frame arriving within the refractory window updates the

@@ -56,3 +56,13 @@ viewer:
   enabled: true       # false -> clip_viewer.py exits without serving
   host: 0.0.0.0       # 0.0.0.0 = reachable on your LAN; 127.0.0.1 = Pi only
   port: 8099
+
+# System health — publishes this process's own CPU/memory usage plus
+# board health (voltage, temperature, swap, load, disk free) as HA
+# sensors, on its own schedule independent of the audio pipeline. Requires
+# `vcgencmd` (present on Raspberry Pi OS); set enabled: false if running
+# this off a Pi. Optional: delete this section to disable; missing keys
+# fall back to the defaults shown.
+system:
+  enabled: true
+  interval_seconds: 60   # how often to publish system health sensors
