@@ -2,35 +2,51 @@
 """
 Sound level monitor for Home Assistant.
 
-Captures audio continuously, computes mean and max dBFS per 1-minute window,
-and publishes to MQTT with Home Assistant auto-discovery.
+Captures audio continuously, computes Leq mean and max dBFS per 1-minute
+window, and publishes to MQTT with Home Assistant auto-discovery.
 
 Install dependencies:
-    pip3 install -r requirements.txt
-
-Configure:
-    cp config.yaml.example config.yaml
-    # then edit config.yaml
+    pip3 install sounddevice numpy paho-mqtt
 
 List available audio devices:
     python3 -c "import sounddevice; print(sounddevice.query_devices())"
 """
 
-import argparse
 import json
 import logging
-import queue
 import time
-from pathlib import Path
 
 import numpy as np
 import paho.mqtt.client as mqtt
 import sounddevice as sd
-import yaml
 
-from event_detection import ClipRecorder, EventDetector
+# ---------------------------------------------------------------------------
+# Configuration — edit these
+# ---------------------------------------------------------------------------
+MQTT_BROKER   = "homeassistant.local"
+MQTT_PORT     = 1883
+MQTT_USER     = "mqtt_user"
+MQTT_PASSWORD = "mqtt_password"
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config.yaml"
+DEVICE_NAME   = "Living Room Sound Monitor"   # Friendly name shown in HA
+DEVICE_ID     = "sound_monitor_living_room"   # Unique ID (no spaces)
+TOPIC_BASE    = f"home/{DEVICE_ID}"
+
+# Audio settings
+# 16000 Hz is plenty for detecting pops/creaks and much lighter on a Pi Zero.
+# 500 ms chunks reduce callback frequency, preventing input overflow.
+SAMPLE_RATE      = 16000   # Hz
+CHANNELS         = 1
+CHUNK_SECONDS    = 0.5     # seconds per audio callback block
+INTERVAL_SECONDS = 60      # publish every N seconds
+
+# Watchdog: if no audio arrives for this many seconds, restart the stream.
+WATCHDOG_SECONDS = INTERVAL_SECONDS * 2
+
+# Optional: pin to a specific input device index (leave None for system default)
+# Run: python3 -c "import sounddevice; print(sounddevice.query_devices())"
+AUDIO_DEVICE = None
+# ---------------------------------------------------------------------------
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,280 +55,103 @@ logging.basicConfig(
 )
 log = logging.getLogger("sound_monitor")
 
-REQUIRED_CONFIG_KEYS = {
-    "mqtt": ["broker", "port", "user", "password"],
-    "device": ["name", "id"],
-    "audio": ["sample_rate", "channels", "chunk_seconds", "device"],
-}
-
-# Optional sections — merged over these defaults if present in config.yaml.
-DETECTION_DEFAULTS = {
-    "enabled": True,
-    "frame_seconds": 0.01,
-    "threshold_db": 15.0,
-    "refractory_seconds": 0.2,
-    "baseline_window_seconds": 30.0,
-    "min_trigger_dbfs": -70.0,
-}
-CLIPS_DEFAULTS = {
-    "enabled": True,
-    "directory": "clips",
-    "pre_seconds": 1.0,
-    "post_seconds": 2.0,
-    "max_clips": 200,
-    "max_storage_mb": 1000,
-    "max_clip_seconds": 60.0,
-}
-
-
-def load_config(path: Path) -> dict:
-    """Load and validate the YAML config file."""
-    if not path.exists():
-        raise SystemExit(
-            f"Config file not found: {path}\n"
-            f"Copy config.yaml.example to {path.name} and fill in your values."
-        )
-
-    with path.open() as f:
-        config = yaml.safe_load(f)
-
-    for section, keys in REQUIRED_CONFIG_KEYS.items():
-        if section not in config:
-            raise SystemExit(f"Config missing section: {section}")
-        for key in keys:
-            if key not in config[section]:
-                raise SystemExit(f"Config missing key: {section}.{key}")
-
-    if "interval_seconds" not in config:
-        raise SystemExit("Config missing key: interval_seconds")
-
-    return config
-
 
 def rms_to_dbfs(rms: float) -> float:
     """Convert linear RMS amplitude [0, 1] to dBFS."""
     return 20.0 * np.log10(max(rms, 1e-10))
 
 
-def publish_discovery(
-    client: mqtt.Client, config: dict, detection_enabled: bool
-) -> None:
-    """Publish MQTT auto-discovery messages so HA creates sensors automatically.
-
-    ``detection_enabled`` gates the detector-derived sensors: the L90
-    ``baseline_dbfs`` floor is only meaningful (and only ever published)
-    when the event detector is running.
-    """
-    device_name = config["device"]["name"]
-    device_id = config["device"]["id"]
-    topic_base = f"home/{device_id}"
-    interval_seconds = config["interval_seconds"]
-
+def publish_discovery(client: mqtt.Client) -> None:
+    """Publish MQTT auto-discovery messages so HA creates sensors automatically."""
     device_block = {
-        "identifiers": [device_id],
-        "name": device_name,
+        "identifiers": [DEVICE_ID],
+        "name": DEVICE_NAME,
         "model": "Raspberry Pi Sound Monitor",
         "manufacturer": "DIY",
     }
 
     metrics = {
         "mean_dbfs": {
-            "name": f"{device_name} Mean dBFS",
+            "name": f"{DEVICE_NAME} Mean dBFS",
             "icon": "mdi:microphone",
-            "unit": "dBFS",
         },
         "max_dbfs": {
-            "name": f"{device_name} Max dBFS",
+            "name": f"{DEVICE_NAME} Max dBFS",
             "icon": "mdi:microphone-plus",
-            "unit": "dBFS",
-        },
-        "events_per_minute": {
-            "name": f"{device_name} Events Per Minute",
-            "icon": "mdi:pulse",
-            "unit": "events/min",
-        },
-        "last_event_peak": {
-            "name": f"{device_name} Last Event Peak",
-            "icon": "mdi:waveform",
-            "unit": "dBFS",
-            "state_topic": f"{topic_base}/event",
-            "value_template": "{{ value_json.peak_dbfs }}",
-            # A pop an hour ago is still the last event — never expire.
-            "no_expire": True,
         },
     }
-
-    if detection_enabled:
-        # L90 ambient floor (10th-percentile level over the detector's rolling
-        # window). Unlike Mean dBFS (an energy average that loud pops drag up),
-        # this reads the quiet floor and stays put during transients.
-        metrics["baseline_dbfs"] = {
-            "name": f"{device_name} Baseline dBFS",
-            "icon": "mdi:microphone-minus",
-            "unit": "dBFS",
-        }
 
     for key, meta in metrics.items():
         payload = {
             "name": meta["name"],
-            "unique_id": f"{device_id}_{key}",
-            "state_topic": meta.get("state_topic", f"{topic_base}/{key}"),
-            "unit_of_measurement": meta["unit"],
+            "unique_id": f"{DEVICE_ID}_{key}",
+            "state_topic": f"{TOPIC_BASE}/{key}",
+            "unit_of_measurement": "dBFS",
             "icon": meta["icon"],
             "device": device_block,
+            "expire_after": INTERVAL_SECONDS * 3,
         }
-        if "value_template" in meta:
-            payload["value_template"] = meta["value_template"]
-        if not meta.get("no_expire"):
-            # Keep last value displayed until next update
-            payload["expire_after"] = interval_seconds * 3
         client.publish(
-            f"homeassistant/sensor/{device_id}/{key}/config",
+            f"homeassistant/sensor/{DEVICE_ID}/{key}/config",
             json.dumps(payload),
             retain=True,
         )
         log.info("Published discovery for %s", key)
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--config",
-        type=Path,
-        default=DEFAULT_CONFIG_PATH,
-        help=f"Path to config YAML file (default: {DEFAULT_CONFIG_PATH})",
-    )
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    config = load_config(args.config)
-
-    device_id = config["device"]["id"]
-    topic_base = f"home/{device_id}"
-    interval_seconds = config["interval_seconds"]
-    sample_rate = config["audio"]["sample_rate"]
-    channels = config["audio"]["channels"]
-    chunk_seconds = config["audio"]["chunk_seconds"]
-    audio_device = config["audio"]["device"]
-
-    # --- MQTT setup ---
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=device_id)
-    client.username_pw_set(config["mqtt"]["user"], config["mqtt"]["password"])
-    client.connect(config["mqtt"]["broker"], config["mqtt"]["port"], keepalive=60)
-    client.loop_start()
-
-    # --- Event detection setup ---
-    # Resolve detection config before discovery so we know whether to
-    # advertise the detector-derived baseline_dbfs sensor.
-    det_cfg = {**DETECTION_DEFAULTS, **config.get("detection", {})}
-    clips_cfg = {**CLIPS_DEFAULTS, **config.get("clips", {})}
-
-    publish_discovery(client, config, det_cfg["enabled"])
-
-    detector = None
-    recorder = None
-    if det_cfg["enabled"]:
-        detector = EventDetector(
-            sample_rate=sample_rate,
-            frame_seconds=det_cfg["frame_seconds"],
-            threshold_db=det_cfg["threshold_db"],
-            refractory_seconds=det_cfg["refractory_seconds"],
-            baseline_window_seconds=det_cfg["baseline_window_seconds"],
-            min_trigger_dbfs=det_cfg["min_trigger_dbfs"],
-        )
-        if clips_cfg["enabled"]:
-            recorder = ClipRecorder(
-                sample_rate=sample_rate,
-                directory=clips_cfg["directory"],
-                pre_seconds=clips_cfg["pre_seconds"],
-                post_seconds=clips_cfg["post_seconds"],
-                max_clips=clips_cfg["max_clips"],
-                max_storage_mb=clips_cfg["max_storage_mb"],
-                max_clip_seconds=clips_cfg["max_clip_seconds"],
-            )
-        log.info(
-            "Event detection on  (threshold=+%.0f dB, clips=%s)",
-            det_cfg["threshold_db"],
-            clips_cfg["directory"] if recorder else "off",
-        )
-
-    # --- Audio capture loop ---
-    chunk_size = int(sample_rate * chunk_seconds)
-    # Unbounded is safe: the 0.1s drain loop far outpaces the ~10 chunks/s
-    # producer, and paho's loop_start() keeps client.publish() non-blocking.
-    audio_queue: queue.Queue[np.ndarray] = queue.Queue()
-    window_buffer: list[np.ndarray] = []
+def run_stream(client: mqtt.Client) -> None:
+    """Open the audio stream and publish until the watchdog or an exception fires."""
+    chunk_size   = int(SAMPLE_RATE * CHUNK_SECONDS)
+    audio_buffer: list[np.ndarray] = []
     window_start = time.monotonic()
-    event_count = 0
+    last_audio   = time.monotonic()
 
     def on_audio(indata: np.ndarray, frames: int, time_info, status) -> None:
+        nonlocal last_audio
         if status:
             log.warning("Audio stream status: %s", status)
-        audio_queue.put(indata[:, 0].copy())  # keep mono channel
+        audio_buffer.append(indata[:, 0].copy())
+        last_audio = time.monotonic()
 
     log.info(
-        "Starting audio capture  (device=%s, rate=%d Hz, interval=%ds)",
-        audio_device or "default",
-        sample_rate,
-        interval_seconds,
+        "Opening audio stream  (device=%s, rate=%d Hz, chunk=%.1fs, interval=%ds)",
+        AUDIO_DEVICE or "default",
+        SAMPLE_RATE,
+        CHUNK_SECONDS,
+        INTERVAL_SECONDS,
     )
 
     with sd.InputStream(
-        device=audio_device,
-        samplerate=sample_rate,
-        channels=channels,
+        device=AUDIO_DEVICE,
+        samplerate=SAMPLE_RATE,
+        channels=CHANNELS,
         dtype="float32",
         blocksize=chunk_size,
         callback=on_audio,
     ):
         while True:
-            time.sleep(0.1)
+            time.sleep(0.5)
 
-            # Drain the queue: feed minute stats and the event detector.
-            while True:
-                try:
-                    chunk = audio_queue.get_nowait()
-                except queue.Empty:
-                    break
-                window_buffer.append(chunk)
-                events = detector.process(chunk) if detector else []
-                for ev in events:
-                    event_count += 1
-                    # peak_dbfs here is the trigger-instant value. The clip
-                    # filename uses ev.peak_dbfs after refractory updates, so
-                    # a louder follow-up frame can make the two disagree.
-                    client.publish(
-                        f"{topic_base}/event",
-                        json.dumps({
-                            "timestamp": ev.timestamp,
-                            "peak_dbfs": round(ev.peak_dbfs, 1),
-                            "baseline_dbfs": round(ev.baseline_dbfs, 1),
-                            "over_baseline_db": round(ev.over_baseline_db, 1),
-                        }),
-                    )
-                    log.info(
-                        "Event  peak=%.1f dBFS  (+%.1f dB over baseline)",
-                        ev.peak_dbfs, ev.over_baseline_db,
-                    )
-                if recorder:
-                    recorder.process(chunk, events)
+            # Watchdog: restart stream if audio has gone silent unexpectedly
+            if time.monotonic() - last_audio > WATCHDOG_SECONDS:
+                log.warning("Watchdog: no audio for %ds — restarting stream.", WATCHDOG_SECONDS)
+                audio_buffer.clear()
+                return  # caller will reopen the stream
 
             elapsed = time.monotonic() - window_start
-            if elapsed < interval_seconds:
+            if elapsed < INTERVAL_SECONDS:
                 continue
 
             # --- Process the collected window ---
-            if not window_buffer:
+            if not audio_buffer:
                 window_start = time.monotonic()
                 continue
 
-            all_samples = np.concatenate(window_buffer)
-            window_buffer.clear()
+            all_samples = np.concatenate(audio_buffer)
+            audio_buffer.clear()
             window_start = time.monotonic()
 
-            # Split into 100 ms chunks, compute per-chunk dBFS, then aggregate
+            # Compute per-chunk dBFS
             n_chunks = max(1, len(all_samples) // chunk_size)
             chunks   = np.array_split(all_samples, n_chunks)
             chunk_db = [
@@ -321,32 +160,40 @@ def main() -> None:
                 if len(c) > 0
             ]
 
-            # Leq: average power in linear domain, then convert back to dB
+            # Leq mean: average power in linear domain, then convert to dB
             mean_power = float(np.mean([10 ** (db / 20) for db in chunk_db]))
             mean_db = round(20 * np.log10(max(mean_power, 1e-10)), 1)
             max_db  = round(float(np.max(chunk_db)), 1)
 
-            # Normalize the interval's event count to a per-minute rate so the
-            # "Events Per Minute" sensor stays truthful when interval_seconds
-            # != 60. At the default 60 s interval this equals the raw count.
-            events_per_min = round(event_count * 60 / interval_seconds, 1)
+            client.publish(f"{TOPIC_BASE}/mean_dbfs", mean_db)
+            client.publish(f"{TOPIC_BASE}/max_dbfs",  max_db)
+            log.info("Published  mean=%.1f dBFS  max=%.1f dBFS", mean_db, max_db)
 
-            # L90 ambient floor from the detector (None during the first
-            # second of warmup, or when detection is disabled).
-            baseline_db = detector.baseline_dbfs if detector else None
 
-            client.publish(f"{topic_base}/mean_dbfs", mean_db)
-            client.publish(f"{topic_base}/max_dbfs",  max_db)
-            client.publish(f"{topic_base}/events_per_minute", events_per_min)
-            if baseline_db is not None:
-                client.publish(f"{topic_base}/baseline_dbfs", round(baseline_db, 1))
-            log.info(
-                "Published  mean=%.1f  max=%.1f  baseline=%s dBFS  events=%d (%.1f/min)",
-                mean_db, max_db,
-                f"{baseline_db:.1f}" if baseline_db is not None else "n/a",
-                event_count, events_per_min,
-            )
-            event_count = 0
+def main() -> None:
+    # --- MQTT setup ---
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=DEVICE_ID)
+    client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
+
+    # Retry until the broker is reachable — handles slow DNS / boot ordering
+    while True:
+        try:
+            client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
+            break
+        except Exception as exc:
+            log.warning("MQTT connect failed (%s) — retrying in 10s", exc)
+            time.sleep(10)
+
+    client.loop_start()
+    publish_discovery(client)
+
+    # --- Stream loop with automatic restart ---
+    while True:
+        try:
+            run_stream(client)
+        except Exception as exc:
+            log.error("Stream error: %s — restarting in 5s", exc)
+            time.sleep(5)
 
 
 if __name__ == "__main__":
