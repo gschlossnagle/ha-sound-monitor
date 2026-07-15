@@ -64,3 +64,65 @@ def find_card_index(cards_text: str, name_substring: str) -> int:
             f"use a more specific substring in audio.device"
         )
     return matches[0]
+
+
+def run_amixer(card_index: int, control: str, value: str) -> None:
+    subprocess.run(
+        ["amixer", "-c", str(card_index), "sset", control, value],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
+    args = parser.parse_args()
+
+    config = yaml.safe_load(args.config.read_text())
+    audio_cfg = config.get("audio", {})
+    volume_percent = audio_cfg.get("capture_volume_percent")
+
+    if volume_percent is None:
+        print("audio.capture_volume_percent not set — skipping AGC/gain fix")
+        return 0
+
+    device_substring = audio_cfg.get("device")
+    if not device_substring:
+        print(
+            "audio.capture_volume_percent is set but audio.device is empty "
+            "— cannot resolve which ALSA card to fix",
+            file=sys.stderr,
+        )
+        return 1
+
+    cards_text = Path("/proc/asound/cards").read_text()
+    try:
+        card_index = find_card_index(cards_text, device_substring)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    try:
+        run_amixer(card_index, "Auto Gain Control,0", "off")
+        run_amixer(card_index, "Mic,0", f"{volume_percent}%")
+    except subprocess.CalledProcessError as exc:
+        print(
+            f"amixer failed on card {card_index}: {exc.stderr.strip()}",
+            file=sys.stderr,
+        )
+        return 1
+    except OSError as exc:
+        print(f"Could not run amixer: {exc}", file=sys.stderr)
+        return 1
+
+    print(
+        f"Card {card_index}: Auto Gain Control off, Mic capture volume "
+        f"pinned to {volume_percent}%"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
