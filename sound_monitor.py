@@ -188,7 +188,9 @@ def publish_discovery(
         log.info("Published discovery for %s", key)
 
 
-def publish_system_discovery(client: mqtt.Client, config: dict) -> None:
+def publish_system_discovery(
+    client: mqtt.Client, config: dict, interval_seconds: float
+) -> None:
     """Publish MQTT discovery for system-health sensors: this process's own
     CPU%/memory, plus board-level voltage/temperature/swap/load/disk. Runs
     independently of ``detection_enabled`` -- these sensors don't depend on
@@ -247,6 +249,7 @@ def publish_system_discovery(client: mqtt.Client, config: dict) -> None:
             "unit_of_measurement": meta["unit"],
             "icon": meta["icon"],
             "state_class": "measurement",
+            "expire_after": interval_seconds * 3,
             "device": device_block,
         }
         if "device_class" in meta:
@@ -265,6 +268,7 @@ def publish_system_discovery(client: mqtt.Client, config: dict) -> None:
         "device_class": "problem",
         "payload_on": "ON",
         "payload_off": "OFF",
+        "expire_after": interval_seconds * 3,
         "device": device_block,
     }
     client.publish(
@@ -460,6 +464,8 @@ def run_system_stats(
                     continue
                 if key == "under_voltage":
                     client.publish(f"{topic_base}/{key}", "ON" if value else "OFF")
+                elif key == "core_volts":
+                    client.publish(f"{topic_base}/{key}", round(value, 2))
                 else:
                     client.publish(f"{topic_base}/{key}", round(value, 1))
             log.info(
@@ -508,7 +514,7 @@ def main() -> None:
     # --- System health stats (independent of the audio pipeline) ---
     sys_cfg = {**SYSTEM_DEFAULTS, **config.get("system", {})}
     if sys_cfg["enabled"]:
-        publish_system_discovery(client, config)
+        publish_system_discovery(client, config, sys_cfg["interval_seconds"])
         threading.Thread(
             target=run_system_stats,
             args=(client, config, sys_cfg["interval_seconds"]),
