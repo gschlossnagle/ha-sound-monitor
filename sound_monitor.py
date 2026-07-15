@@ -94,6 +94,17 @@ def rms_to_dbfs(rms: float) -> float:
     return 20.0 * np.log10(max(rms, 1e-10))
 
 
+def _device_block(config: dict) -> dict:
+    """The shared HA `device` block so every entity (audio + system
+    sensors) groups under one device card."""
+    return {
+        "identifiers": [config["device"]["id"]],
+        "name": config["device"]["name"],
+        "model": "Raspberry Pi Sound Monitor",
+        "manufacturer": "DIY",
+    }
+
+
 def publish_discovery(
     client: mqtt.Client, config: dict, detection_enabled: bool
 ) -> None:
@@ -108,12 +119,7 @@ def publish_discovery(
     topic_base = f"home/{device_id}"
     interval_seconds = config["interval_seconds"]
 
-    device_block = {
-        "identifiers": [device_id],
-        "name": device_name,
-        "model": "Raspberry Pi Sound Monitor",
-        "manufacturer": "DIY",
-    }
+    device_block = _device_block(config)
 
     metrics = {
         "mean_dbfs": {
