@@ -19,8 +19,11 @@ List available audio devices:
 import argparse
 import json
 import logging
+import os
 import queue
+import threading
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -29,6 +32,7 @@ import sounddevice as sd
 import yaml
 
 from event_detection import ClipRecorder, EventDetector, enqueue_or_drop
+from system_stats import collect_stats
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config.yaml"
 
@@ -62,6 +66,10 @@ CLIPS_DEFAULTS = {
     "max_clips": 200,
     "max_storage_mb": 1000,
     "max_clip_seconds": 60.0,
+}
+SYSTEM_DEFAULTS = {
+    "enabled": True,
+    "interval_seconds": 60,
 }
 
 
@@ -178,6 +186,93 @@ def publish_discovery(
             retain=True,
         )
         log.info("Published discovery for %s", key)
+
+
+def publish_system_discovery(client: mqtt.Client, config: dict) -> None:
+    """Publish MQTT discovery for system-health sensors: this process's own
+    CPU%/memory, plus board-level voltage/temperature/swap/load/disk. Runs
+    independently of ``detection_enabled`` -- these sensors don't depend on
+    the event detector.
+    """
+    device_name = config["device"]["name"]
+    device_id = config["device"]["id"]
+    topic_base = f"home/{device_id}/system"
+    device_block = _device_block(config)
+
+    sensors = {
+        "sound_monitor_cpu_percent": {
+            "name": f"{device_name} CPU %",
+            "unit": "%",
+            "icon": "mdi:chip",
+        },
+        "sound_monitor_mem_mb": {
+            "name": f"{device_name} Memory MB",
+            "unit": "MB",
+            "icon": "mdi:memory",
+        },
+        "core_volts": {
+            "name": f"{device_name} Core Voltage",
+            "unit": "V",
+            "icon": "mdi:flash",
+            "device_class": "voltage",
+        },
+        "cpu_temp_c": {
+            "name": f"{device_name} CPU Temp",
+            "unit": "°C",
+            "icon": "mdi:thermometer",
+            "device_class": "temperature",
+        },
+        "swap_percent": {
+            "name": f"{device_name} Swap Used %",
+            "unit": "%",
+            "icon": "mdi:swap-horizontal",
+        },
+        "load_avg_1m": {
+            "name": f"{device_name} Load Average (1m)",
+            "unit": "",
+            "icon": "mdi:speedometer",
+        },
+        "disk_free_percent": {
+            "name": f"{device_name} SD Card Free %",
+            "unit": "%",
+            "icon": "mdi:sd",
+        },
+    }
+
+    for key, meta in sensors.items():
+        payload = {
+            "name": meta["name"],
+            "unique_id": f"{device_id}_{key}",
+            "state_topic": f"{topic_base}/{key}",
+            "unit_of_measurement": meta["unit"],
+            "icon": meta["icon"],
+            "state_class": "measurement",
+            "device": device_block,
+        }
+        if "device_class" in meta:
+            payload["device_class"] = meta["device_class"]
+        client.publish(
+            f"homeassistant/sensor/{device_id}/{key}/config",
+            json.dumps(payload),
+            retain=True,
+        )
+        log.info("Published discovery for %s", key)
+
+    binary_payload = {
+        "name": f"{device_name} Under-Voltage",
+        "unique_id": f"{device_id}_under_voltage",
+        "state_topic": f"{topic_base}/under_voltage",
+        "device_class": "problem",
+        "payload_on": "ON",
+        "payload_off": "OFF",
+        "device": device_block,
+    }
+    client.publish(
+        f"homeassistant/binary_sensor/{device_id}/under_voltage/config",
+        json.dumps(binary_payload),
+        retain=True,
+    )
+    log.info("Published discovery for under_voltage")
 
 
 def parse_args() -> argparse.Namespace:
@@ -344,6 +439,41 @@ def run_stream(
             event_count = 0
 
 
+def run_system_stats(
+    client: mqtt.Client, config: dict, interval_seconds: float
+) -> None:
+    """Collect and publish system-health stats on its own cadence,
+    independent of the audio pipeline. A failure in one cycle is logged
+    and the loop continues -- this must keep running even if run_stream()
+    is wedged or crash-looping, so HA never goes dark on system health at
+    exactly the moment it's most needed.
+    """
+    device_id = config["device"]["id"]
+    topic_base = f"home/{device_id}/system"
+    pid = os.getpid()
+
+    while True:
+        try:
+            stats = collect_stats(pid)
+            for key, value in asdict(stats).items():
+                if value is None:
+                    continue
+                if key == "under_voltage":
+                    client.publish(f"{topic_base}/{key}", "ON" if value else "OFF")
+                else:
+                    client.publish(f"{topic_base}/{key}", round(value, 1))
+            log.info(
+                "System stats  cpu=%s%%  mem=%sMB  volts=%sV  temp=%s°C  "
+                "swap=%s%%  load=%s  disk_free=%s%%  under_voltage=%s",
+                stats.sound_monitor_cpu_percent, stats.sound_monitor_mem_mb,
+                stats.core_volts, stats.cpu_temp_c, stats.swap_percent,
+                stats.load_avg_1m, stats.disk_free_percent, stats.under_voltage,
+            )
+        except Exception as exc:
+            log.error("System stats cycle failed: %s", exc)
+        time.sleep(interval_seconds)
+
+
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
@@ -374,6 +504,19 @@ def main() -> None:
     clips_cfg = {**CLIPS_DEFAULTS, **config.get("clips", {})}
 
     publish_discovery(client, config, det_cfg["enabled"])
+
+    # --- System health stats (independent of the audio pipeline) ---
+    sys_cfg = {**SYSTEM_DEFAULTS, **config.get("system", {})}
+    if sys_cfg["enabled"]:
+        publish_system_discovery(client, config)
+        threading.Thread(
+            target=run_system_stats,
+            args=(client, config, sys_cfg["interval_seconds"]),
+            daemon=True,
+        ).start()
+        log.info(
+            "System stats on  (interval=%ds)", sys_cfg["interval_seconds"]
+        )
 
     detector = None
     recorder = None
