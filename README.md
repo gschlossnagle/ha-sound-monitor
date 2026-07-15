@@ -161,13 +161,16 @@ clean way to spot transient activity. Each event is also published as JSON to
 
 Independent of the audio pipeline, `sound_monitor` also publishes its own
 resource usage and board health every `system.interval_seconds` (default
-60s): **CPU %** and **Memory MB** (the `sound_monitor` process itself),
-**Core Voltage**, **CPU Temp**, **Swap Used %**, **Load Average (1m)**,
-**SD Card Free %**, and a binary **Under-Voltage** sensor. These publish on
-their own thread, decoupled from the audio watchdog, so they keep
-reporting even if the audio stream itself is stalled or restarting.
-Requires `vcgencmd` (present on Raspberry Pi OS); set `system.enabled:
-false` in `config.yaml` if running this off a Pi.
+60s) to `home/<device_id>/system/<key>`: **CPU %** and **Memory MB** (the
+`sound_monitor` process itself), **Core Voltage**, **CPU Temp**, **Swap
+Used %**, **Load Average (1m)**, **SD Card Free %**, and a binary
+**Under-Voltage** sensor. These publish on their own thread, decoupled
+from the audio watchdog, so they keep reporting even if the audio stream
+itself is stalled or restarting.
+Core Voltage, CPU Temp, and Under-Voltage require `vcgencmd` (present on
+Raspberry Pi OS) and simply stop reporting on other hosts; the other five
+sensors work anywhere. Set `system.enabled: false` in `config.yaml` only
+if you want to disable system stats entirely.
 
 Note: the event JSON and the **Last Event Peak** sensor report the peak at the
 moment the event triggered. A saved clip's filename may show a slightly higher
