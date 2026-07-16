@@ -23,6 +23,13 @@ audio:
   # Run: python3 -c "import sounddevice; print(sounddevice.query_devices())"
   # to find your device index.
   device: null
+  # Optional. If set, fix_mic_gain.py (run automatically via ExecStartPre)
+  # disables the mic's hardware Auto Gain Control and pins its capture
+  # volume to this percentage on every service start. Required for
+  # calibration.offset_db below to stay valid — AGC constantly re-scales
+  # gain, so a fixed dB offset only makes sense once gain is fixed too.
+  # Omit this key to skip the gain fix entirely (today's behavior).
+  capture_volume_percent: 100
 
 interval_seconds: 60    # Publish every N seconds
 
@@ -48,6 +55,16 @@ clips:
                                 # flurry stops extending here (0 = no cap)
   max_clips: 200                # delete oldest clips beyond this count (0 = keep all)
   max_storage_mb: 1000          # delete oldest clips to stay under this size (0 = no limit)
+
+# Calibration — converts published dBFS values to approximate real-world
+# dB SPL. Optional; omit entirely to keep today's raw-dBFS behavior.
+calibration:
+  # Add this many dB to every published *absolute* level (Mean/Max/Baseline
+  # dBFS, event peak/baseline). Derive it by comparing a Mean dBFS reading
+  # against a reference SPL meter pointed at the same steady sound — see
+  # README's "Calibrating" section. Only valid for the audio.capture_volume_percent
+  # above; re-derive this number if that value ever changes.
+  offset_db: 0.0
 
 # Clip viewer — a small LAN web UI (clip_viewer.py) for reviewing saved
 # clips: list newest-first, play inline, download, delete. Optional; the
