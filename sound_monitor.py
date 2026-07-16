@@ -317,6 +317,9 @@ def run_stream(
     """
     device_id = config["device"]["id"]
     topic_base = f"home/{device_id}"
+    # Once a calibration offset is configured, published values are no
+    # longer raw dBFS — relabel the log lines so they match publish_discovery().
+    absolute_unit = "dB SPL" if offset_db else "dBFS"
     interval_seconds = config["interval_seconds"]
     sample_rate = config["audio"]["sample_rate"]
     channels = config["audio"]["channels"]
@@ -399,8 +402,8 @@ def run_stream(
                         }),
                     )
                     log.info(
-                        "Event  peak=%.1f dBFS  (+%.1f dB over baseline)",
-                        apply_offset(ev.peak_dbfs, offset_db), ev.over_baseline_db,
+                        "Event  peak=%.1f %s  (+%.1f dB over baseline)",
+                        apply_offset(ev.peak_dbfs, offset_db), absolute_unit, ev.over_baseline_db,
                     )
                 if recorder:
                     recorder.process(chunk, events)
@@ -449,10 +452,10 @@ def run_stream(
             if baseline_db is not None:
                 client.publish(f"{topic_base}/baseline_dbfs", baseline_db)
             log.info(
-                "Published  mean=%.1f  max=%.1f  baseline=%s dBFS  events=%d (%.1f/min)",
+                "Published  mean=%.1f  max=%.1f  baseline=%s %s  events=%d (%.1f/min)",
                 mean_db, max_db,
                 f"{baseline_db:.1f}" if baseline_db is not None else "n/a",
-                event_count, events_per_min,
+                absolute_unit, event_count, events_per_min,
             )
             event_count = 0
 
@@ -522,8 +525,9 @@ def main() -> None:
     # advertise the detector-derived baseline_dbfs sensor.
     det_cfg = {**DETECTION_DEFAULTS, **config.get("detection", {})}
     clips_cfg = {**CLIPS_DEFAULTS, **config.get("clips", {})}
+    cal_cfg = {**CALIBRATION_DEFAULTS, **config.get("calibration", {})}
 
-    publish_discovery(client, config, det_cfg["enabled"])
+    publish_discovery(client, config, det_cfg["enabled"], cal_cfg["offset_db"])
 
     # --- System health stats (independent of the audio pipeline) ---
     sys_cfg = {**SYSTEM_DEFAULTS, **config.get("system", {})}
@@ -570,7 +574,7 @@ def main() -> None:
     # way we reopen it. The detector/recorder persist across restarts.
     while True:
         try:
-            run_stream(client, config, detector, recorder)
+            run_stream(client, config, detector, recorder, cal_cfg["offset_db"])
         except Exception as exc:
             log.error("Stream error: %s — reopening in 5s", exc)
             time.sleep(5)
