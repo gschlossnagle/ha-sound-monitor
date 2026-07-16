@@ -18,6 +18,10 @@ WorkingDirectory=/home/pi
 # Create it once with:
 #   python3 -m venv /home/pi/venv
 #   /home/pi/venv/bin/pip install -r /home/pi/requirements.txt
+# Disables hardware AGC and pins capture gain before every start — see
+# fix_mic_gain.py. A no-op if audio.capture_volume_percent isn't set in
+# config.yaml. Runs with the same User/venv as ExecStart below.
+ExecStartPre=/home/pi/venv/bin/python /home/pi/fix_mic_gain.py
 ExecStart=/home/pi/venv/bin/python /home/pi/sound_monitor.py
 Restart=always
 RestartSec=10
