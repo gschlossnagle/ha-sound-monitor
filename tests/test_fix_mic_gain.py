@@ -1,7 +1,10 @@
 """Tests for fix_mic_gain's card-resolution logic — pure text parsing, no hardware."""
 
+import sys
+
 import pytest
 
+import fix_mic_gain
 from fix_mic_gain import find_card_index
 
 CARDS_TEXT = """\
@@ -39,3 +42,21 @@ class TestFindCardIndex:
     def test_ambiguous_match_raises(self):
         with pytest.raises(ValueError, match="matched multiple"):
             find_card_index(AMBIGUOUS_CARDS_TEXT, "USB Audio")
+
+
+class TestMainNoOpSkip:
+    def test_missing_capture_volume_percent_skips_without_touching_amixer(
+        self, tmp_path, monkeypatch
+    ):
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text('audio:\n  device: "ATR4697"\n')
+
+        def _fail_if_called(*args, **kwargs):
+            raise AssertionError("run_amixer should not be called on the no-op path")
+
+        monkeypatch.setattr(fix_mic_gain, "run_amixer", _fail_if_called)
+        monkeypatch.setattr(
+            sys, "argv", ["fix_mic_gain.py", "--config", str(config_path)]
+        )
+
+        assert fix_mic_gain.main() == 0
