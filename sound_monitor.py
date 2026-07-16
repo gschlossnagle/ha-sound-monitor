@@ -304,6 +304,7 @@ def run_stream(
     config: dict,
     detector: EventDetector | None,
     recorder: ClipRecorder | None,
+    offset_db: float = 0.0,
 ) -> None:
     """Open the audio stream and process it until the watchdog trips.
 
@@ -390,14 +391,16 @@ def run_stream(
                         f"{topic_base}/event",
                         json.dumps({
                             "timestamp": ev.timestamp,
-                            "peak_dbfs": round(ev.peak_dbfs, 1),
-                            "baseline_dbfs": round(ev.baseline_dbfs, 1),
+                            "peak_dbfs": apply_offset(ev.peak_dbfs, offset_db),
+                            "baseline_dbfs": apply_offset(ev.baseline_dbfs, offset_db),
+                            # A delta (peak - baseline): the offset cancels out
+                            # identically, so it's deliberately NOT applied here.
                             "over_baseline_db": round(ev.over_baseline_db, 1),
                         }),
                     )
                     log.info(
                         "Event  peak=%.1f dBFS  (+%.1f dB over baseline)",
-                        ev.peak_dbfs, ev.over_baseline_db,
+                        apply_offset(ev.peak_dbfs, offset_db), ev.over_baseline_db,
                     )
                 if recorder:
                     recorder.process(chunk, events)
@@ -426,8 +429,8 @@ def run_stream(
 
             # Leq: average power in linear domain, then convert back to dB
             mean_power = float(np.mean([10 ** (db / 20) for db in chunk_db]))
-            mean_db = round(20 * np.log10(max(mean_power, 1e-10)), 1)
-            max_db  = round(float(np.max(chunk_db)), 1)
+            mean_db = apply_offset(20 * np.log10(max(mean_power, 1e-10)), offset_db)
+            max_db  = apply_offset(float(np.max(chunk_db)), offset_db)
 
             # Normalize the interval's event count to a per-minute rate so the
             # "Events Per Minute" sensor stays truthful when interval_seconds
@@ -437,12 +440,14 @@ def run_stream(
             # L90 ambient floor from the detector (None during the first
             # second of warmup, or when detection is disabled).
             baseline_db = detector.baseline_dbfs if detector else None
+            if baseline_db is not None:
+                baseline_db = apply_offset(baseline_db, offset_db)
 
             client.publish(f"{topic_base}/mean_dbfs", mean_db)
             client.publish(f"{topic_base}/max_dbfs",  max_db)
             client.publish(f"{topic_base}/events_per_minute", events_per_min)
             if baseline_db is not None:
-                client.publish(f"{topic_base}/baseline_dbfs", round(baseline_db, 1))
+                client.publish(f"{topic_base}/baseline_dbfs", baseline_db)
             log.info(
                 "Published  mean=%.1f  max=%.1f  baseline=%s dBFS  events=%d (%.1f/min)",
                 mean_db, max_db,
