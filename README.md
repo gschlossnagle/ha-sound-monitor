@@ -72,6 +72,7 @@ cp config.yaml.example config.yaml
 | `audio.channels` | Number of input channels (default: `1`) |
 | `audio.chunk_seconds` | Size of each audio chunk fed into the buffer (default: `0.1`) |
 | `audio.device` | Device index from step 2, or `null` for system default |
+| `audio.capture_volume_percent` | Optional. Pins the mic's capture gain to this percentage and disables hardware AGC on every service start (via `fix_mic_gain.py`, run as `ExecStartPre`). Omit to skip the gain fix. |
 | `interval_seconds` | Reporting interval in seconds (default: `60`) |
 | `detection.enabled` | Enable on-device event detection (default: `true`) |
 | `detection.frame_seconds` | Analysis frame size in seconds (default: `0.01` = 10 ms) |
@@ -86,6 +87,7 @@ cp config.yaml.example config.yaml
 | `clips.max_clip_seconds` | Ceiling on one clip's post-roll so a long flurry can't record forever; `0` disables (default: `60`) |
 | `clips.max_clips` | Oldest clips beyond this count are deleted; `0` keeps all (default: `200`) |
 | `clips.max_storage_mb` | Oldest clips are deleted to keep the `clips/` dir under this size in MB; `0` disables (default: `1000` ≈ 1 GB) |
+| `calibration.offset_db` | Optional (default: `0.0`). Added to every published absolute dBFS value (Mean/Max/Baseline dBFS, event peak/baseline) to approximate real-world dB SPL. See "Calibrating" below. |
 | `viewer.enabled` | Run the clip-review web UI (default: `true`) |
 | `viewer.host` | Bind address — `0.0.0.0` for LAN, `127.0.0.1` for Pi-only (default: `0.0.0.0`) |
 | `viewer.port` | Port for the clip viewer (default: `8099`) |
@@ -122,9 +124,11 @@ and a line for each detected event as it happens:
 ### 5. Install as a systemd service
 
 ```bash
-# Copy the app files (event_detection.py is imported by sound_monitor.py,
-# and requirements.txt is needed to build the venv on the Pi)
-cp sound_monitor.py event_detection.py requirements.txt config.yaml /home/pi/
+# Copy the app files (event_detection.py and calibration.py are imported
+# by sound_monitor.py, fix_mic_gain.py runs as ExecStartPre, and
+# requirements.txt is needed to build the venv on the Pi)
+cp sound_monitor.py event_detection.py calibration.py fix_mic_gain.py \
+   requirements.txt config.yaml /home/pi/
 
 # Build the venv at its final location — a venv is not relocatable, so it
 # must be created on the Pi, in the directory the service will run from
@@ -193,6 +197,37 @@ dBFS (decibels relative to full scale) is always ≤ 0. The absolute values depe
 | Background noise (HVAC, etc.) | −45 dBFS | −40 dBFS | ~5 dB |
 | Single loud pop | −55 dBFS | −25 dBFS | ~30 dB |
 
+### Calibrating to real-world dB SPL
+
+dBFS values depend on the mic's gain, so out of the box they're only
+comparable to themselves — useful for spotting relative pop/creak patterns,
+but not directly comparable to a spec sheet or another sensor. To convert
+readings to approximate dB SPL:
+
+1. Set `audio.capture_volume_percent` in `config.yaml` (e.g. `100`) and
+   restart the service. This disables the mic's hardware AGC and pins its
+   gain — required before any calibration offset can stay valid, since AGC
+   would otherwise keep changing the gain out from under it.
+2. Play or generate a steady sound (e.g. a phone's pink-noise generator) at
+   a fixed distance from the mic, and let a reference SPL meter and the
+   **Mean dBFS** HA sensor both settle on a reading.
+3. Compute `offset_db = reference_spl_reading - mean_dbfs_reading`. For
+   example, a meter reading 62 dB SPL while Mean dBFS reads -48.3 gives
+   `offset_db = 62 - (-48.3) = 110.3`.
+4. Set `calibration.offset_db` to that value in `config.yaml` and restart
+   the service. All absolute-level sensors (Mean, Max, Baseline dBFS, and
+   the event peak) now read in dB SPL, and their HA unit label switches
+   from `dBFS` to `dB SPL` automatically.
+
+If you ever change `audio.capture_volume_percent`, the mic's gain changes
+and `offset_db` must be re-derived — repeat steps 2–3.
+
+Note: Home Assistant caches a sensor's unit of measurement in its entity
+registry. If the unit doesn't update automatically after you set
+`offset_db` and restart, delete the affected entity in HA (Settings →
+Devices & Services → Entities) and let it re-discover, or correct the
+unit manually in the entity's settings.
+
 ## Reviewing clips
 
 When clip capture is enabled, `clip_viewer.py` serves the saved WAVs as a
@@ -245,6 +280,7 @@ they appear, with the symptom in the journal and the fix.
 | `arecord -l` as the service user says "no soundcards found" | The service user isn't in the `audio` group, so `/dev/snd/*` is unreadable | `sudo usermod -aG audio <user>` then restart the service (no reboot needed) |
 | `arecord -l` shows the card but `Subdevices: 0/1`, and `query_devices()` omits it | The mic is busy — another process (often a desktop PipeWire/PulseAudio session) holds it open | `sudo fuser -v /dev/snd/pcmC*c` to find the holder and stop it; re-check for `1/1` |
 | `Unknown key 'StartLimitIntervalSec' in section [Service], ignoring` | `StartLimit*` keys were placed under `[Service]` | Move them to `[Unit]` (fixed in the shipped unit as of the current version) |
+| `sound_monitor` fails to start; `journalctl` shows a `fix_mic_gain.py` error before it | `ExecStartPre` failed — either no ALSA card matched `audio.device`, or the card doesn't expose `'Auto Gain Control'`/`'Mic'` simple-mixer controls | Run `amixer -c <idx> scontrols` for the card `arecord -l` shows as your mic to confirm the exact control names; if the mic genuinely has no AGC control, remove `audio.capture_volume_percent` from `config.yaml` to skip the gain fix |
 
 To confirm the mic a service will actually use, always enumerate **as the
 service user**, not your login shell — the two can differ:
@@ -265,6 +301,8 @@ network/firewall problem.
 ha-sound-monitor/
 ├── sound_monitor.py       # Main capture + MQTT publish script
 ├── event_detection.py     # EventDetector + ClipRecorder (no hardware deps)
+├── calibration.py         # dB offset arithmetic (no hardware deps)
+├── fix_mic_gain.py        # Disables AGC + pins capture gain (ExecStartPre)
 ├── clip_viewer.py         # LAN web UI for reviewing saved clips
 ├── sound_monitor.service  # systemd unit for the capture service
 ├── clip_viewer.service    # systemd unit for the clip viewer
