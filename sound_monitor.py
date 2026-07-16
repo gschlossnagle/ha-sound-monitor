@@ -31,6 +31,7 @@ import paho.mqtt.client as mqtt
 import sounddevice as sd
 import yaml
 
+from calibration import apply_offset
 from event_detection import ClipRecorder, EventDetector, enqueue_or_drop
 from system_stats import collect_stats
 
@@ -66,6 +67,9 @@ CLIPS_DEFAULTS = {
     "max_clips": 200,
     "max_storage_mb": 1000,
     "max_clip_seconds": 60.0,
+}
+CALIBRATION_DEFAULTS = {
+    "offset_db": 0.0,
 }
 SYSTEM_DEFAULTS = {
     "enabled": True,
