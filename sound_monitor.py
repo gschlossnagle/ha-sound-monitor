@@ -118,7 +118,8 @@ def _device_block(config: dict) -> dict:
 
 
 def publish_discovery(
-    client: mqtt.Client, config: dict, detection_enabled: bool
+    client: mqtt.Client, config: dict, detection_enabled: bool,
+    offset_db: float = 0.0,
 ) -> None:
     """Publish MQTT auto-discovery messages so HA creates sensors automatically.
 
@@ -131,18 +132,22 @@ def publish_discovery(
     topic_base = f"home/{device_id}"
     interval_seconds = config["interval_seconds"]
 
+    # Once a calibration offset is configured, published values are no
+    # longer raw dBFS — relabel the affected sensors so HA shows the truth.
+    absolute_unit = "dB SPL" if offset_db else "dBFS"
+
     device_block = _device_block(config)
 
     metrics = {
         "mean_dbfs": {
             "name": f"{device_name} Mean dBFS",
             "icon": "mdi:microphone",
-            "unit": "dBFS",
+            "unit": absolute_unit,
         },
         "max_dbfs": {
             "name": f"{device_name} Max dBFS",
             "icon": "mdi:microphone-plus",
-            "unit": "dBFS",
+            "unit": absolute_unit,
         },
         "events_per_minute": {
             "name": f"{device_name} Events Per Minute",
@@ -152,7 +157,7 @@ def publish_discovery(
         "last_event_peak": {
             "name": f"{device_name} Last Event Peak",
             "icon": "mdi:waveform",
-            "unit": "dBFS",
+            "unit": absolute_unit,
             "state_topic": f"{topic_base}/event",
             "value_template": "{{ value_json.peak_dbfs }}",
             # A pop an hour ago is still the last event — never expire.
@@ -167,7 +172,7 @@ def publish_discovery(
         metrics["baseline_dbfs"] = {
             "name": f"{device_name} Baseline dBFS",
             "icon": "mdi:microphone-minus",
-            "unit": "dBFS",
+            "unit": absolute_unit,
         }
 
     for key, meta in metrics.items():
