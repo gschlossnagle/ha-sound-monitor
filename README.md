@@ -220,7 +220,9 @@ readings to approximate dB SPL:
    from `dBFS` to `dB SPL` automatically.
 
 If you ever change `audio.capture_volume_percent`, the mic's gain changes
-and `offset_db` must be re-derived — repeat steps 2–3.
+and `offset_db` must be re-derived — first set `calibration.offset_db` back
+to `0.0` and restart the service (so the Mean dBFS sensor reads raw dBFS
+again), then repeat steps 2–3.
 
 Note: Home Assistant caches a sensor's unit of measurement in its entity
 registry. If the unit doesn't update automatically after you set
